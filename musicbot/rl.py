@@ -164,7 +164,7 @@ def reinforce(gen_model, ref_model, critic, data, steps, device, log=print, G=8,
         cont = sample_continuations(gen_model, prompt, seg, temp=1.0, device=device)
         full = torch.cat([prompt, cont], 1)[:, -(gen_model.cfg.ctx) :]
         with torch.no_grad():
-            r_critic = torch.sigmoid(critic(full[:, -critic.cfg.ctx :]))
+            r_critic = torch.sigmoid(critic(full[:, -critic.cfg.ctx :]) / 4.0)
         r_theory = torch.tensor([theory_reward(row.tolist()) for row in cont], device=device)
         r_base = r_critic + 0.5 * r_theory
         adv = (r_base - r_base.mean()) / (r_base.std() + 1e-4)
