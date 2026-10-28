@@ -5,14 +5,17 @@
 #  Run on Kaggle:  !git clone https://github.com/thisisforlearn/classical-gen
 #                  !pip install -q mido rich
 #                  !python classical-gen/kaggle/train_kaggle.py
-#  Backup: checkpoints auto-upload to a GitHub release (tag "checkpoint")
-#  every ~1200 steps IF a Kaggle secret named GITHUB_TOKEN exists.
+#  Backup: checkpoints auto-upload to Hugging Face Hub
+#  (huggingface.co/thisisforlearn/maestro-checkpoints) every ~1200 steps
+#  IF a Kaggle secret named HF_TOKEN exists — every upload is a new revision,
+#  so full checkpoint history is preserved.
 #  Resume: on a fresh session the script auto-downloads the last ckpt.pt
-#  from that release — no manual Input attachment needed.
+#  from the Hub — no manual Input attachment needed.
 # ============================================================
 import os, sys, subprocess, glob, shutil, time, json, zipfile, urllib.request, urllib.parse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-subprocess.run([sys.executable, "-m", "pip", "install", "-q", "mido", "rich"], check=False)
+subprocess.run([sys.executable, "-m", "pip", "install", "-q", "mido", "rich", "huggingface_hub"],
+               check=False)
 import numpy as np
 import torch
 from rich.console import Console
@@ -44,63 +47,44 @@ PRE_STEPS, PRE_SECONDS = 20000, 6.5 * 3600
 CKPT = os.path.join(OUT, "ckpt.pt")
 BUNDLE = os.path.join(OUT, "maestro_bundle.pt")
 ZIP = os.path.join(OUT, "maestro_bundle.zip")
-GH_REPO = "thisisforlearn/classical-gen"
+HF_REPO = "thisisforlearn/maestro-checkpoints"
 
 
-def gh_token():
-    tok = os.environ.get("GITHUB_TOKEN")
+def hf_token():
+    tok = os.environ.get("HF_TOKEN")
     if tok:
         return tok.strip()
     try:
         from kaggle_secrets import UserSecretsClient
-        return UserSecretsClient().get_secret("GITHUB_TOKEN").strip()
+        return UserSecretsClient().get_secret("HF_TOKEN").strip()
     except Exception:
         return None
 
 
-def gh_fetch(name, dest, log=print):
-    url = f"https://github.com/{GH_REPO}/releases/download/checkpoint/{name}"
+def hf_fetch(name, dest, log=print):
     try:
-        urllib.request.urlretrieve(url, dest)
-        log(f"[green]downloaded previous {name} from GitHub releases[/]")
+        from huggingface_hub import hf_hub_download
+        p = hf_hub_download(HF_REPO, name, repo_type="model", token=hf_token() or None)
+        shutil.copy(p, dest)
+        log(f"[green]downloaded previous {name} from huggingface.co/{HF_REPO}[/]")
         return True
     except Exception:
         return False
 
 
-def gh_backup(path, name, tok, log=print):
+def hf_backup(path, name, tok, log=print):
     if not tok:
-        log("[yellow]backup skipped — add a Kaggle secret named GITHUB_TOKEN (Add-ons -> Secrets)[/]")
+        log("[yellow]backup skipped — add a Kaggle secret named HF_TOKEN (Add-ons -> Secrets)[/]")
         return False
-    api = "https://api.github.com"
-    hdr = {"Authorization": f"Bearer {tok}", "Accept": "application/vnd.github+json"}
-
-    def req(url, data=None, method=None, ct=None):
-        r = urllib.request.Request(url, data=data, method=method)
-        for k, v in hdr.items():
-            r.add_header(k, v)
-        if ct:
-            r.add_header("Content-Type", ct)
-        return urllib.request.urlopen(r, timeout=600)
-
     try:
-        rel = None
-        try:
-            with req(f"{api}/repos/{GH_REPO}/releases/tags/checkpoint") as f:
-                rel = json.loads(f.read())
-        except Exception:
-            body = json.dumps({"tag_name": "checkpoint", "name": "training checkpoints",
-                               "body": "auto-uploaded ckpt.pt / maestro_bundle.zip"}).encode()
-            with req(f"{api}/repos/{GH_REPO}/releases", data=body, method="POST",
-                     ct="application/json") as f:
-                rel = json.loads(f.read())
-        for a in rel.get("assets", []):
-            if a["name"] == name:
-                req(f"{api}/repos/{GH_REPO}/releases/assets/{a['id']}", method="DELETE").read()
-        up = rel["upload_url"].split("{")[0] + "?name=" + urllib.parse.quote(name)
-        with open(path, "rb") as fh:
-            req(up, data=fh, ct="application/octet-stream").read()
-        log(f"[green]backed up {name} to GitHub releases (~{os.path.getsize(path) / 1e6:.0f} MB)[/]")
+        from huggingface_hub import HfApi
+        api = HfApi(token=tok)
+        api.create_repo(HF_REPO, repo_type="model", exist_ok=True)
+        api.upload_file(path_or_fileobj=path, path_in_repo=name, repo_id=HF_REPO,
+                        repo_type="model",
+                        commit_message=f"backup {name} · {time.strftime('%Y-%m-%d %H:%M')}")
+        log(f"[green]backed up {name} to huggingface.co/{HF_REPO} "
+            f"(~{os.path.getsize(path) / 1e6:.0f} MB)[/]")
         return True
     except Exception as e:
         log(f"[yellow]backup failed (training continues): {e}[/]")
@@ -134,7 +118,7 @@ con.print(f"generator: [bold]{sum(p.numel() for p in gen.parameters()) / 1e6:.0f
           f"critic: {sum(p.numel() for p in crit.parameters()) / 1e6:.0f}M params")
 
 # ---------------- resume detection ----------------
-tok = gh_token()
+tok = hf_token()
 prev_bundles = [BUNDLE] + (glob.glob("/kaggle/input/*/maestro_bundle.pt") if LOCAL else [])
 prev_ckpt = [CKPT] + (glob.glob("/kaggle/input/*/ckpt.pt") if LOCAL else [])
 if any(os.path.exists(p) for p in prev_bundles):
@@ -148,7 +132,7 @@ if any(os.path.exists(p) for p in prev_bundles):
                         f"then locally: unzip -> python -m musicbot all", border_style="green"))
     sys.exit(0)
 if not any(os.path.exists(p) for p in prev_ckpt):
-    if gh_fetch("ckpt.pt", CKPT, log=con.print):
+    if hf_fetch("ckpt.pt", CKPT, log=con.print):
         prev_ckpt = [CKPT]
 if any(os.path.exists(p) for p in prev_ckpt):
     src = next(p for p in prev_ckpt if os.path.exists(p))
@@ -166,7 +150,7 @@ _last_up = [0]
 def _ck(model, step, em):
     torch.save({"gen": model.state_dict(), "ema": em.state(), "step": step, "cfg": GCFG}, CKPT)
     if step - _last_up[0] >= 1200 or step >= PRE_STEPS:
-        if gh_backup(CKPT, "ckpt.pt", tok, log=con.print):
+        if hf_backup(CKPT, "ckpt.pt", tok, log=con.print):
             _last_up[0] = step
 
 # ---------------- stage 1: pretrain ----------------
@@ -207,6 +191,6 @@ for i in range(3):
     con.print(f"  preview_{i + 1}.mid")
 
 make_zip()
-gh_backup(ZIP, "maestro_bundle.zip", tok, log=con.print)
+hf_backup(ZIP, "maestro_bundle.zip", tok, log=con.print)
 con.print(Panel.fit("[bold green]DONE[/] — download [bold]maestro_bundle.zip[/] from the Output panel\n"
                     "then locally: unzip -> python -m musicbot all", border_style="green"))
