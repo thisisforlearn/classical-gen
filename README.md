@@ -28,17 +28,34 @@ python -m musicbot check      # environment report
 python -m musicbot kaggle     # writes models/kaggle_cell.py + prints instructions
 ```
 
-## Train on Kaggle (free GPU) — one paste, max quality
+## Train on Kaggle (free GPU) — GitHub flow (recommended)
 
-1. `python -m musicbot kaggle` → prints exact steps and writes `models/kaggle_cell.py`
-2. kaggle.com → New Notebook → Accelerator **GPU T4 x2** → Internet **On**
-3. Paste the whole `kaggle_cell.py` content into **one cell** → Run.
-   It automatically: installs deps → downloads MAESTRO v3 + **Mutopia archive** →
-   tokenizes (~40M+ tokens) → pretrains the **~85M-param generator on both T4s**
-   (DataParallel, bf16, FlashAttention, 6.5 h time budget) → trains the **critic** →
-   runs **REINFORCE** RL fine-tuning → writes **`maestro_bundle.zip`** + preview MIDIs
-   to Output. Fits one 12 h session; if interrupted, re-running the cell resumes
-   from `ckpt.pt`.
+1. kaggle.com → New Notebook → Accelerator **GPU T4 x2** → Internet **On**
+2. Paste **one cell**:
+
+   ```
+   !git clone https://github.com/thisisforlearn/classical-gen
+   !pip install -q mido rich
+   !python classical-gen/kaggle/train_kaggle.py
+   ```
+
+   It automatically: installs deps → downloads MAESTRO v3 + **Mutopia archive** (parallel
+   FTP crawler) → tokenizes (~28M tokens) → pretrains the **~85M-param generator on both
+   T4s** (DataParallel, bf16, FlashAttention, EMA weights, label smoothing, dropout,
+   live progress bars, 6.5 h time budget) → trains the **critic** → runs **REINFORCE** RL
+   → writes **`maestro_bundle.zip`** + 3 preview MIDIs to Output.
+
+3. **Never lose progress**: checkpoints (`ckpt.pt`, incl. EMA state) are saved every
+   150 steps to `/kaggle/working`. If the session dies: click **Save Version**, then in a
+   new session attach the previous notebook Output as an **Input** — the script
+   auto-detects `ckpt.pt` / `maestro_bundle.pt` there and resumes exactly where it
+   stopped (also reuses the tokenized corpus).
+
+### Fallback: one-paste cell (no GitHub)
+
+Run `python -m musicbot kaggle` → copy `models/kaggle_cell.py` content into one Kaggle
+cell → Run. Same training, self-contained.
+
 4. Download `maestro_bundle.zip`, unzip, put `maestro_bundle.pt` into `~/music-bot/models/`
 
 ## Compose + render locally (fast CPU: int8 oneDNN/AVX2, 12 threads)
