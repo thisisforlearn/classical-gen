@@ -5,10 +5,13 @@
 #  Run on Kaggle:  !git clone https://github.com/thisisforlearn/classical-gen
 #                  !pip install -q mido rich
 #                  !python classical-gen/kaggle/train_kaggle.py
-#  Resume: attach this notebook's previous Output as an Input dataset —
-#  the script auto-detects ckpt.pt / maestro_bundle.pt there and continues.
+#  Backup: checkpoints auto-upload to a GitHub release (tag "checkpoint")
+#  every ~1200 steps IF a Kaggle secret named GITHUB_TOKEN exists.
+#  Resume: on a fresh session the script auto-downloads the last ckpt.pt
+#  from that release — no manual Input attachment needed.
 # ============================================================
-import os, sys, subprocess, glob, shutil, time, zipfile
+import os, sys, subprocess, glob, shutil, time, json, zipfile, urllib.request, urllib.parse
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "mido", "rich"], check=False)
 import numpy as np
 import torch
@@ -29,9 +32,9 @@ ngpu = torch.cuda.device_count()
 con.print(f"GPU: {torch.cuda.get_device_name(0)} x{ngpu} · bf16={torch.cuda.is_bf16_supported()}")
 
 WORK = "/kaggle/working"
-LOCAL = os.path.isdir("/kaggle/working") and os.environ.get("KAGGLE_KERNEL_RUN_TYPE") is not None
+LOCAL = os.path.isdir(WORK) and os.environ.get("KAGGLE_KERNEL_RUN_TYPE") is not None
 OUT = WORK if LOCAL else os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
-DATA = os.path.join(OUT, "..", "data") if not LOCAL else "data"
+DATA = "data" if LOCAL else os.path.join(os.path.dirname(OUT), "data")
 os.makedirs(OUT, exist_ok=True)
 os.makedirs(DATA, exist_ok=True)
 
@@ -40,6 +43,75 @@ CCFG = dict(CRIT_CFG, d=512, n_layer=8, n_head=8, ff=1536, ctx=512)
 PRE_STEPS, PRE_SECONDS = 20000, 6.5 * 3600
 CKPT = os.path.join(OUT, "ckpt.pt")
 BUNDLE = os.path.join(OUT, "maestro_bundle.pt")
+ZIP = os.path.join(OUT, "maestro_bundle.zip")
+GH_REPO = "thisisforlearn/classical-gen"
+
+
+def gh_token():
+    tok = os.environ.get("GITHUB_TOKEN")
+    if tok:
+        return tok.strip()
+    try:
+        from kaggle_secrets import UserSecretsClient
+        return UserSecretsClient().get_secret("GITHUB_TOKEN").strip()
+    except Exception:
+        return None
+
+
+def gh_fetch(name, dest, log=print):
+    url = f"https://github.com/{GH_REPO}/releases/download/checkpoint/{name}"
+    try:
+        urllib.request.urlretrieve(url, dest)
+        log(f"[green]downloaded previous {name} from GitHub releases[/]")
+        return True
+    except Exception:
+        return False
+
+
+def gh_backup(path, name, tok, log=print):
+    if not tok:
+        log("[yellow]backup skipped — add a Kaggle secret named GITHUB_TOKEN (Add-ons -> Secrets)[/]")
+        return False
+    api = "https://api.github.com"
+    hdr = {"Authorization": f"Bearer {tok}", "Accept": "application/vnd.github+json"}
+
+    def req(url, data=None, method=None, ct=None):
+        r = urllib.request.Request(url, data=data, method=method)
+        for k, v in hdr.items():
+            r.add_header(k, v)
+        if ct:
+            r.add_header("Content-Type", ct)
+        return urllib.request.urlopen(r, timeout=600)
+
+    try:
+        rel = None
+        try:
+            with req(f"{api}/repos/{GH_REPO}/releases/tags/checkpoint") as f:
+                rel = json.loads(f.read())
+        except Exception:
+            body = json.dumps({"tag_name": "checkpoint", "name": "training checkpoints",
+                               "body": "auto-uploaded ckpt.pt / maestro_bundle.zip"}).encode()
+            with req(f"{api}/repos/{GH_REPO}/releases", data=body, method="POST",
+                     ct="application/json") as f:
+                rel = json.loads(f.read())
+        for a in rel.get("assets", []):
+            if a["name"] == name:
+                req(f"{api}/repos/{GH_REPO}/releases/assets/{a['id']}", method="DELETE").read()
+        up = rel["upload_url"].split("{")[0] + "?name=" + urllib.parse.quote(name)
+        with open(path, "rb") as fh:
+            req(up, data=fh, ct="application/octet-stream").read()
+        log(f"[green]backed up {name} to GitHub releases (~{os.path.getsize(path) / 1e6:.0f} MB)[/]")
+        return True
+    except Exception as e:
+        log(f"[yellow]backup failed (training continues): {e}[/]")
+        return False
+
+
+def make_zip():
+    with zipfile.ZipFile(ZIP, "w", zipfile.ZIP_STORED) as z:
+        for f in [BUNDLE] + sorted(glob.glob(os.path.join(OUT, "preview_*.mid"))):
+            z.write(f, os.path.basename(f))
+
 
 # ---------------- data ----------------
 tok_dir = os.path.join(DATA, "tokens")
@@ -52,7 +124,7 @@ if not os.path.exists(os.path.join(tok_dir, "packed.npy")):
     mutopia_dir = download_mutopia(DATA, log=con.print)
     tokenize_corpus([maestro_dir, mutopia_dir] if mutopia_dir else [maestro_dir], tok_dir,
                     workers=4, log=con.print)
-data = PackedData(tok_dir)
+data = PackedData(tok_dir, 1024)
 con.print(f"corpus: [bold]{data.tokens.size // 10**6}M[/] tokens")
 
 # ---------------- models ----------------
@@ -62,6 +134,7 @@ con.print(f"generator: [bold]{sum(p.numel() for p in gen.parameters()) / 1e6:.0f
           f"critic: {sum(p.numel() for p in crit.parameters()) / 1e6:.0f}M params")
 
 # ---------------- resume detection ----------------
+tok = gh_token()
 prev_bundles = [BUNDLE] + (glob.glob("/kaggle/input/*/maestro_bundle.pt") if LOCAL else [])
 prev_ckpt = [CKPT] + (glob.glob("/kaggle/input/*/ckpt.pt") if LOCAL else [])
 if any(os.path.exists(p) for p in prev_bundles):
@@ -69,8 +142,15 @@ if any(os.path.exists(p) for p in prev_bundles):
     if src != BUNDLE:
         shutil.copy(src, BUNDLE)
     con.print(Panel.fit("[bold green]complete bundle found — training already done![/]\n"
-                        "Re-run outputs maestro_bundle.zip with fresh previews.", border_style="green"))
-elif any(os.path.exists(p) for p in prev_ckpt):
+                        "Re-zipping outputs with fresh previews.", border_style="green"))
+    make_zip()
+    con.print(Panel.fit(f"[bold green]DONE[/] — download [bold]maestro_bundle.zip[/] from the Output panel\n"
+                        f"then locally: unzip -> python -m musicbot all", border_style="green"))
+    sys.exit(0)
+if not any(os.path.exists(p) for p in prev_ckpt):
+    if gh_fetch("ckpt.pt", CKPT, log=con.print):
+        prev_ckpt = [CKPT]
+if any(os.path.exists(p) for p in prev_ckpt):
     src = next(p for p in prev_ckpt if os.path.exists(p))
     sd = torch.load(src, map_location="cpu", weights_only=False)
     gen.load_state_dict(sd["gen"])
@@ -81,8 +161,13 @@ elif any(os.path.exists(p) for p in prev_ckpt):
 else:
     ema, step0 = EMA(gen), 0
 
+_last_up = [0]
+
 def _ck(model, step, em):
     torch.save({"gen": model.state_dict(), "ema": em.state(), "step": step, "cfg": GCFG}, CKPT)
+    if step - _last_up[0] >= 1200 or step >= PRE_STEPS:
+        if gh_backup(CKPT, "ckpt.pt", tok, log=con.print):
+            _last_up[0] = step
 
 # ---------------- stage 1: pretrain ----------------
 if step0 < PRE_STEPS:
@@ -118,15 +203,10 @@ torch.save({"gen_cfg": GCFG, "crit_cfg": CCFG, "gen": gen.state_dict(),
 con.print("generating 3 preview pieces (30s each)...")
 for i in range(3):
     torch.manual_seed(2024 + i)
-    mid = os.path.join(OUT, f"preview_{i + 1}.mid")
-    compose(gen, crit, minutes=0.5, K=2, device=dev).save(mid)
+    compose(gen, crit, minutes=0.5, K=2, device=dev).save(os.path.join(OUT, f"preview_{i + 1}.mid"))
     con.print(f"  preview_{i + 1}.mid")
 
-if os.path.exists(CKPT):
-    os.remove(CKPT)
-zip_path = os.path.join(OUT, "maestro_bundle.zip")
-with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as z:
-    for f in [BUNDLE] + sorted(glob.glob(os.path.join(OUT, "preview_*.mid"))):
-        z.write(f, os.path.basename(f))
+make_zip()
+gh_backup(ZIP, "maestro_bundle.zip", tok, log=con.print)
 con.print(Panel.fit("[bold green]DONE[/] — download [bold]maestro_bundle.zip[/] from the Output panel\n"
-                    "then locally: unzip → python -m musicbot all", border_style="green"))
+                    "then locally: unzip -> python -m musicbot all", border_style="green"))
