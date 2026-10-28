@@ -120,6 +120,17 @@ def make_zip():
             z.write(f, os.path.basename(f))
 
 
+def save_stage(tag, payload, tok, log=print):
+    ts = time.strftime("%Y%m%d-%H%M")
+    payload = dict(payload, stage=tag, ts=ts)
+    path = os.path.join(OUT, f"ckpt_{tag}.pt")
+    torch.save(payload, path)
+    if hf_backup(path, f"ckpt_{tag}.pt", tok, log=log):
+        arch = os.path.join(OUT, f"maestro_{tag}_{ts}.pt")
+        shutil.copy(path, arch)
+        hf_backup(arch, f"maestro_{tag}_{ts}.pt", tok, log=log)
+
+
 hf_ok = hf_check(hf_token(), log=con.print)
 
 # ---------------- models ----------------
@@ -131,6 +142,8 @@ con.print(f"generator: [bold]{sum(p.numel() for p in gen.parameters()) / 1e6:.0f
 # ---------------- resume detection (before downloads — instant answer) ----------------
 tok = hf_token() if hf_ok else None
 prev_bundles = [BUNDLE] + (glob.glob("/kaggle/input/*/maestro_bundle.pt") if LOCAL else [])
+prev_stage = [os.path.join(OUT, "ckpt_critic.pt")] + \
+    (glob.glob("/kaggle/input/*/ckpt_critic.pt") if LOCAL else [])
 prev_ckpt = [CKPT] + (glob.glob("/kaggle/input/*/ckpt.pt") if LOCAL else [])
 if any(os.path.exists(p) for p in prev_bundles):
     src = next(p for p in prev_bundles if os.path.exists(p))
@@ -142,27 +155,49 @@ if any(os.path.exists(p) for p in prev_bundles):
     con.print(Panel.fit(f"[bold green]DONE[/] — download [bold]maestro_bundle.zip[/] from the Output panel\n"
                         f"then locally: unzip -> python -m musicbot all", border_style="green"))
     sys.exit(0)
-if not any(os.path.exists(p) for p in prev_ckpt):
-    con.print("looking for a previous checkpoint on Hugging Face...")
-    if hf_fetch("ckpt.pt", CKPT, log=con.print):
-        prev_ckpt = [CKPT]
+if not any(os.path.exists(p) for p in prev_stage):
+    con.print("looking for a previous critic checkpoint on Hugging Face...")
+    if hf_fetch("ckpt_critic.pt", prev_stage[0], log=con.print):
+        prev_stage = [prev_stage[0]]
     else:
-        con.print("no previous checkpoint found — training from scratch")
-ema, step0 = EMA(gen), 0
-for p in prev_ckpt:
+        con.print("no critic checkpoint — critic will train from scratch")
+ema, step0, critic_done = EMA(gen), 0, False
+for p in prev_stage:
     if not os.path.exists(p):
         continue
     try:
         sd = torch.load(p, map_location="cpu", weights_only=False)
         gen.load_state_dict(sd["gen"])
+        crit.load_state_dict(sd["critic"])
         ema = EMA(gen)
         ema.load(sd["ema"])
-        step0 = int(sd.get("step", 0))
-        con.print(f"[green]resumed from checkpoint at step {step0}[/]")
+        step0 = int(sd.get("step", PRE_STEPS))
+        critic_done = True
+        con.print(f"[green]resumed critic checkpoint (saved {sd.get('ts', '?')}) — skipping to REINFORCE[/]")
     except Exception as e:
-        con.print(f"[yellow]checkpoint {p} unusable ({e}) — starting fresh[/]")
-        ema, step0 = EMA(gen), 0
+        con.print(f"[yellow]critic checkpoint {p} unusable ({e})[/]")
     break
+if not critic_done:
+    if not any(os.path.exists(p) for p in prev_ckpt):
+        con.print("looking for a previous pretrain checkpoint on Hugging Face...")
+        if hf_fetch("ckpt.pt", CKPT, log=con.print):
+            prev_ckpt = [CKPT]
+        else:
+            con.print("no previous checkpoint found — training from scratch")
+    for p in prev_ckpt:
+        if not os.path.exists(p):
+            continue
+        try:
+            sd = torch.load(p, map_location="cpu", weights_only=False)
+            gen.load_state_dict(sd["gen"])
+            ema = EMA(gen)
+            ema.load(sd["ema"])
+            step0 = int(sd.get("step", 0))
+            con.print(f"[green]resumed from checkpoint at step {step0}[/]")
+        except Exception as e:
+            con.print(f"[yellow]checkpoint {p} unusable ({e}) — starting fresh[/]")
+            ema, step0 = EMA(gen), 0
+        break
 
 _last_up = [0]
 
@@ -188,19 +223,26 @@ con.print(f"corpus: [bold]{data.n_tokens // 10**6}M[/] tokens · {data.n_pieces}
 
 # ---------------- stages 1-3 ----------------
 try:
-    if step0 < PRE_STEPS:
-        con.print(Panel.fit(f"[bold]stage 1/3 — pretrain[/] {PRE_STEPS - step0} steps · budget {PRE_SECONDS / 3600:.1f}h"))
-        gen, ema = pretrain(gen, data, PRE_STEPS, bs=12, lr=3e-4, device=dev, bf16=True,
-                            log=con.print, ckpt_fn=_ck, ckpt_every=150, amp_device="cuda",
-                            parallel=ngpu > 1, accum=2, max_seconds=PRE_SECONDS,
-                            use_bar=True, ls=0.1)
-        _ck(gen, PRE_STEPS, ema)
-    else:
-        con.print("[green]pretrain already complete — skipping to critic[/]")
+    if not critic_done:
+        if step0 < PRE_STEPS:
+            con.print(Panel.fit(f"[bold]stage 1/3 — pretrain[/] {PRE_STEPS - step0} steps · budget {PRE_SECONDS / 3600:.1f}h"))
+            gen, ema = pretrain(gen, data, PRE_STEPS, bs=12, lr=3e-4, device=dev, bf16=True,
+                                log=con.print, ckpt_fn=_ck, ckpt_every=150, amp_device="cuda",
+                                parallel=ngpu > 1, accum=2, max_seconds=PRE_SECONDS,
+                                use_bar=True, ls=0.1)
+            _ck(gen, PRE_STEPS, ema)
+            save_stage("pretrain", {"gen": gen.state_dict(), "ema": ema.state(), "step": PRE_STEPS},
+                       tok, log=con.print)
+        else:
+            con.print("[green]pretrain already complete — skipping to critic[/]")
 
-    con.print(Panel.fit("[bold]stage 2/3 — critic training[/]"))
-    train_critic(crit, gen, data, steps=1200, bs=16, lr=3e-4, device=dev, G=6, seg=256,
-                 log=con.print, use_bar=True)
+        con.print(Panel.fit("[bold]stage 2/3 — critic training[/]"))
+        train_critic(crit, gen, data, steps=600, bs=16, lr=3e-4, device=dev, G=6, seg=256,
+                     log=con.print, use_bar=True)
+        save_stage("critic", {"gen": gen.state_dict(), "critic": crit.state_dict(),
+                              "ema": ema.state(), "step": PRE_STEPS}, tok, log=con.print)
+    else:
+        con.print("[green]critic checkpoint found — skipping pretrain + critic, going to REINFORCE[/]")
 
     con.print(Panel.fit("[bold]stage 3/3 — REINFORCE fine-tuning[/]"))
     ref = GPT(GCFG)
