@@ -14,6 +14,8 @@ try:
 except ImportError:
     from tokenizer import VOCAB_SIZE
 
+from torch.nn.attention import SDPBackend, sdpa_kernel
+
 
 class Config(dict):
     def __getattr__(self, k):
@@ -27,11 +29,21 @@ GEN_CFG = Config(vocab=VOCAB_SIZE, d=512, n_layer=10, n_head=8, ctx=1024, ff=136
 CRIT_CFG = Config(vocab=VOCAB_SIZE, d=384, n_layer=6, n_head=6, ctx=512, ff=1024, drop=0.0)
 
 
+_ROPE_CACHE = {}
+
+
 def _rope_cache(seq_len, head_dim, device, dtype):
-    inv = 1.0 / (10000.0 ** (torch.arange(0, head_dim, 2, device=device, dtype=torch.float32) / head_dim))
-    t = torch.arange(seq_len, device=device, dtype=torch.float32)
-    f = torch.outer(t, inv)
-    return torch.cos(f).to(dtype), torch.sin(f).to(dtype)
+    key = (seq_len, head_dim, str(device), str(dtype))
+    r = _ROPE_CACHE.get(key)
+    if r is None:
+        inv = 1.0 / (10000.0 ** (torch.arange(0, head_dim, 2, device=device, dtype=torch.float32) / head_dim))
+        t = torch.arange(seq_len, device=device, dtype=torch.float32)
+        f = torch.outer(t, inv)
+        r = (torch.cos(f).to(dtype), torch.sin(f).to(dtype))
+        if len(_ROPE_CACHE) > 64:
+            _ROPE_CACHE.clear()
+        _ROPE_CACHE[key] = r
+    return r
 
 
 def _apply_rope(x, cos, sin):
@@ -63,6 +75,12 @@ class Attn(nn.Module):
             cache["idx"] = idx + T
             if idx == 0:
                 y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+            elif T == 1:
+                if x.is_cuda:
+                    y = F.scaled_dot_product_attention(q, k, v)
+                else:
+                    with sdpa_kernel(SDPBackend.MATH):
+                        y = F.scaled_dot_product_attention(q, k, v)
             else:
                 L = idx + T
                 pos_k = torch.arange(L, device=x.device)
@@ -117,9 +135,11 @@ class GPT(nn.Module):
     def forward(self, idx, targets=None, cache=None, pos_offset=0, ls=0.0):
         B, T = idx.shape
         x = self.drop(self.emb(idx))
-        cos, sin = _rope_cache(pos_offset + T, self.cfg.d // self.cfg.n_head, x.device, x.dtype)
-        if pos_offset:
-            cos, sin = cos[pos_offset:], sin[pos_offset:]
+        need = pos_offset + T
+        size = self.cfg.ctx if need <= self.cfg.ctx else need
+        cos, sin = _rope_cache(size, self.cfg.d // self.cfg.n_head, x.device, x.dtype)
+        if pos_offset or need != size:
+            cos, sin = cos[pos_offset:need], sin[pos_offset:need]
         for i, b in enumerate(self.blocks):
             x = b(x, cos, sin, cache[i] if cache is not None else None)
         x = self.norm_f(x)
