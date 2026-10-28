@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+data/
+output/
+models/*.pt
+models/kaggle_cell.py
+build/
+dist/
+*.spec
+.ipynb_checkpoints/
