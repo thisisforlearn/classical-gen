@@ -33,7 +33,6 @@ assert torch.cuda.is_available(), "GPU required — enable GPU (T4 x2) in Kaggle
 dev = "cuda"
 ngpu = torch.cuda.device_count()
 con.print(f"GPU: {torch.cuda.get_device_name(0)} x{ngpu} · bf16={torch.cuda.is_bf16_supported()}")
-hf_ok = hf_check(hf_token(), log=con.print)
 
 WORK = "/kaggle/working"
 LOCAL = os.path.isdir(WORK) and os.environ.get("KAGGLE_KERNEL_RUN_TYPE") is not None
@@ -120,6 +119,8 @@ def make_zip():
         for f in [BUNDLE] + sorted(glob.glob(os.path.join(OUT, "preview_*.mid"))):
             z.write(f, os.path.basename(f))
 
+
+hf_ok = hf_check(hf_token(), log=con.print)
 
 # ---------------- data ----------------
 tok_dir = os.path.join(DATA, "tokens")
