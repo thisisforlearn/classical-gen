@@ -122,27 +122,13 @@ def make_zip():
 
 hf_ok = hf_check(hf_token(), log=con.print)
 
-# ---------------- data ----------------
-tok_dir = os.path.join(DATA, "tokens")
-inputs = glob.glob("/kaggle/input/*/tokens/packed.npy") if LOCAL else []
-if not os.path.exists(os.path.join(tok_dir, "packed.npy")) and inputs:
-    shutil.copytree(os.path.dirname(inputs[0]), tok_dir, dirs_exist_ok=True)
-    con.print("[green]reused tokenized corpus from attached previous output[/]")
-if not os.path.exists(os.path.join(tok_dir, "packed.npy")):
-    maestro_dir = download_maestro(DATA, log=con.print)
-    mutopia_dir = download_mutopia(DATA, log=con.print)
-    roots = [maestro_dir] + ([mutopia_dir] if mutopia_dir else [])
-    tokenize_corpus(roots[0], tok_dir, extra_roots=roots[1:], workers=4, log=con.print)
-data = PackedData(tok_dir, 1024)
-con.print(f"corpus: [bold]{data.n_tokens // 10**6}M[/] tokens · {data.n_pieces} pieces")
-
 # ---------------- models ----------------
 gen = GPT(GCFG)
 crit = Critic(CCFG)
 con.print(f"generator: [bold]{sum(p.numel() for p in gen.parameters()) / 1e6:.0f}M[/] params · "
           f"critic: {sum(p.numel() for p in crit.parameters()) / 1e6:.0f}M params")
 
-# ---------------- resume detection ----------------
+# ---------------- resume detection (before downloads — instant answer) ----------------
 tok = hf_token() if hf_ok else None
 prev_bundles = [BUNDLE] + (glob.glob("/kaggle/input/*/maestro_bundle.pt") if LOCAL else [])
 prev_ckpt = [CKPT] + (glob.glob("/kaggle/input/*/ckpt.pt") if LOCAL else [])
@@ -157,8 +143,11 @@ if any(os.path.exists(p) for p in prev_bundles):
                         f"then locally: unzip -> python -m musicbot all", border_style="green"))
     sys.exit(0)
 if not any(os.path.exists(p) for p in prev_ckpt):
+    con.print("looking for a previous checkpoint on Hugging Face...")
     if hf_fetch("ckpt.pt", CKPT, log=con.print):
         prev_ckpt = [CKPT]
+    else:
+        con.print("no previous checkpoint found — training from scratch")
 ema, step0 = EMA(gen), 0
 for p in prev_ckpt:
     if not os.path.exists(p):
@@ -182,6 +171,20 @@ def _ck(model, step, em):
     if step - _last_up[0] >= 1200 or step >= PRE_STEPS:
         if hf_backup(CKPT, "ckpt.pt", tok, log=con.print):
             _last_up[0] = step
+
+# ---------------- data ----------------
+tok_dir = os.path.join(DATA, "tokens")
+inputs = glob.glob("/kaggle/input/*/tokens/packed.npy") if LOCAL else []
+if not os.path.exists(os.path.join(tok_dir, "packed.npy")) and inputs:
+    shutil.copytree(os.path.dirname(inputs[0]), tok_dir, dirs_exist_ok=True)
+    con.print("[green]reused tokenized corpus from attached previous output[/]")
+if not os.path.exists(os.path.join(tok_dir, "packed.npy")):
+    maestro_dir = download_maestro(DATA, log=con.print)
+    mutopia_dir = download_mutopia(DATA, log=con.print)
+    roots = [maestro_dir] + ([mutopia_dir] if mutopia_dir else [])
+    tokenize_corpus(roots[0], tok_dir, extra_roots=roots[1:], workers=4, log=con.print)
+data = PackedData(tok_dir, 1024)
+con.print(f"corpus: [bold]{data.n_tokens // 10**6}M[/] tokens · {data.n_pieces} pieces")
 
 # ---------------- stages 1-3 ----------------
 try:
