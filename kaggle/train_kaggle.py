@@ -134,7 +134,7 @@ if not os.path.exists(os.path.join(tok_dir, "packed.npy")):
     roots = [maestro_dir] + ([mutopia_dir] if mutopia_dir else [])
     tokenize_corpus(roots[0], tok_dir, extra_roots=roots[1:], workers=4, log=con.print)
 data = PackedData(tok_dir, 1024)
-con.print(f"corpus: [bold]{data.tokens.size // 10**6}M[/] tokens")
+con.print(f"corpus: [bold]{data.n_tokens // 10**6}M[/] tokens · {data.n_pieces} pieces")
 
 # ---------------- models ----------------
 gen = GPT(GCFG)
@@ -159,16 +159,21 @@ if any(os.path.exists(p) for p in prev_bundles):
 if not any(os.path.exists(p) for p in prev_ckpt):
     if hf_fetch("ckpt.pt", CKPT, log=con.print):
         prev_ckpt = [CKPT]
-if any(os.path.exists(p) for p in prev_ckpt):
-    src = next(p for p in prev_ckpt if os.path.exists(p))
-    sd = torch.load(src, map_location="cpu", weights_only=False)
-    gen.load_state_dict(sd["gen"])
-    ema = EMA(gen)
-    ema.load(sd["ema"])
-    step0 = int(sd.get("step", 0))
-    con.print(f"[green]resumed from checkpoint at step {step0}[/]")
-else:
-    ema, step0 = EMA(gen), 0
+ema, step0 = EMA(gen), 0
+for p in prev_ckpt:
+    if not os.path.exists(p):
+        continue
+    try:
+        sd = torch.load(p, map_location="cpu", weights_only=False)
+        gen.load_state_dict(sd["gen"])
+        ema = EMA(gen)
+        ema.load(sd["ema"])
+        step0 = int(sd.get("step", 0))
+        con.print(f"[green]resumed from checkpoint at step {step0}[/]")
+    except Exception as e:
+        con.print(f"[yellow]checkpoint {p} unusable ({e}) — starting fresh[/]")
+        ema, step0 = EMA(gen), 0
+    break
 
 _last_up = [0]
 
@@ -178,28 +183,34 @@ def _ck(model, step, em):
         if hf_backup(CKPT, "ckpt.pt", tok, log=con.print):
             _last_up[0] = step
 
-# ---------------- stage 1: pretrain ----------------
-if step0 < PRE_STEPS:
-    con.print(Panel.fit(f"[bold]stage 1/3 — pretrain[/] {PRE_STEPS - step0} steps · budget {PRE_SECONDS / 3600:.1f}h"))
-    gen, ema = pretrain(gen, data, PRE_STEPS, bs=12, lr=3e-4, device=dev, bf16=True,
-                        log=con.print, ckpt_fn=_ck, ckpt_every=150, amp_device="cuda",
-                        parallel=ngpu > 1, accum=2, max_seconds=PRE_SECONDS,
-                        use_bar=True, ls=0.1)
-    _ck(gen, PRE_STEPS, ema)
-else:
-    con.print("[green]pretrain already complete — skipping to critic[/]")
+# ---------------- stages 1-3 ----------------
+try:
+    if step0 < PRE_STEPS:
+        con.print(Panel.fit(f"[bold]stage 1/3 — pretrain[/] {PRE_STEPS - step0} steps · budget {PRE_SECONDS / 3600:.1f}h"))
+        gen, ema = pretrain(gen, data, PRE_STEPS, bs=12, lr=3e-4, device=dev, bf16=True,
+                            log=con.print, ckpt_fn=_ck, ckpt_every=150, amp_device="cuda",
+                            parallel=ngpu > 1, accum=2, max_seconds=PRE_SECONDS,
+                            use_bar=True, ls=0.1)
+        _ck(gen, PRE_STEPS, ema)
+    else:
+        con.print("[green]pretrain already complete — skipping to critic[/]")
 
-# ---------------- stage 2: critic ----------------
-con.print(Panel.fit("[bold]stage 2/3 — critic training[/]"))
-train_critic(crit, gen, data, steps=1200, bs=16, lr=3e-4, device=dev, G=6, seg=256,
-             log=con.print, use_bar=True)
+    con.print(Panel.fit("[bold]stage 2/3 — critic training[/]"))
+    train_critic(crit, gen, data, steps=1200, bs=16, lr=3e-4, device=dev, G=6, seg=256,
+                 log=con.print, use_bar=True)
 
-# ---------------- stage 3: REINFORCE ----------------
-con.print(Panel.fit("[bold]stage 3/3 — REINFORCE fine-tuning[/]"))
-ref = GPT(GCFG)
-ref.load_state_dict(gen.state_dict())
-reinforce(gen, ref, crit, data, steps=600, device=dev, G=8, seg=256, lr=1e-5, beta=0.05,
-          log=con.print, use_bar=True)
+    con.print(Panel.fit("[bold]stage 3/3 — REINFORCE fine-tuning[/]"))
+    ref = GPT(GCFG)
+    ref.load_state_dict(gen.state_dict())
+    reinforce(gen, ref, crit, data, steps=600, device=dev, G=8, seg=256, lr=1e-5, beta=0.05,
+              log=con.print, use_bar=True)
+except KeyboardInterrupt:
+    con.print("[yellow]interrupted — checkpoint is safe; re-run this cell to resume[/]")
+    raise
+except Exception as e:
+    con.print(f"[bold red]training stage failed:[/] {e}\n"
+              "[yellow]your last checkpoint is safe — re-run this cell to resume from it[/]")
+    raise
 
 # ---------------- export (EMA weights = better sampling) ----------------
 con.print(Panel.fit("[bold]exporting[/] — EMA weights into bundle"))
@@ -207,13 +218,16 @@ ema.copy_to(gen)
 torch.save({"gen_cfg": GCFG, "crit_cfg": CCFG, "gen": gen.state_dict(),
             "critic": crit.state_dict(),
             "meta": {"author": "Vaibhav", "license": "GPL-3.0-only",
-                     "corpus_tokens": int(data.tokens.size), "steps": PRE_STEPS}}, BUNDLE)
+                     "corpus_tokens": int(data.n_tokens), "steps": PRE_STEPS}}, BUNDLE)
 
 con.print("generating 3 preview pieces (30s each)...")
 for i in range(3):
-    torch.manual_seed(2024 + i)
-    compose(gen, crit, minutes=0.5, K=2, device=dev).save(os.path.join(OUT, f"preview_{i + 1}.mid"))
-    con.print(f"  preview_{i + 1}.mid")
+    try:
+        torch.manual_seed(2024 + i)
+        compose(gen, crit, minutes=0.5, K=2, device=dev).save(os.path.join(OUT, f"preview_{i + 1}.mid"))
+        con.print(f"  preview_{i + 1}.mid")
+    except Exception as e:
+        con.print(f"[yellow]preview {i + 1} failed (bundle is still exported): {e}[/]")
 
 make_zip()
 hf_backup(ZIP, "maestro_bundle.zip", tok, log=con.print)
