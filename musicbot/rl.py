@@ -56,14 +56,22 @@ def theory_reward(tokens) -> float:
 def sample_continuations(model, prompts, max_new, temp=1.0, topk=40, topp=0.95, rep_pen=1.15, device="cpu"):
     model.eval()
     B, T = prompts.shape
+    prompts = prompts.to(device)
     idx = prompts.clone()
+    nl, H, hd = model.cfg.n_layer, model.cfg.n_head, model.cfg.d // model.cfg.n_head
+    caches = [{"k": torch.zeros(B, H, T + max_new, hd, device=device),
+               "v": torch.zeros(B, H, T + max_new, hd, device=device), "idx": 0} for _ in range(nl)]
+    on_cuda = str(device).startswith("cuda")
+    amp = torch.autocast(device_type="cuda" if on_cuda else "cpu", dtype=torch.bfloat16, enabled=on_cuda)
+    with amp:
+        logits, _ = model(prompts[:, -model.cfg.ctx:], cache=caches)
+    cur = T
     for _ in range(max_new):
-        logits, _ = model(idx[:, -model.cfg.ctx :])
         logits = logits[:, -1, :].float()
         for b in range(B):
-            row = idx[b]
-            uniq, counts = torch.unique(row[-256:], return_counts=True)
-            logits[b, uniq] /= rep_pen ** counts.clamp(max=6).float()
+            row = idx[b, -256:]
+            uniq, cnt = torch.unique(row, return_counts=True)
+            logits[b, uniq] /= rep_pen ** cnt.clamp(max=6).float()
         logits /= max(0.05, temp)
         if topk:
             kth = torch.topk(logits, min(topk, logits.size(-1)), dim=-1)
@@ -79,8 +87,11 @@ def sample_continuations(model, prompts, max_new, temp=1.0, topk=40, topp=0.95, 
         else:
             nxt = torch.multinomial(probs, 1).squeeze(-1)
         idx = torch.cat([idx, nxt[:, None]], dim=1)
+        cur += 1
         if (nxt == EOS).all():
             break
+        with amp:
+            logits, _ = model(nxt[:, None], cache=caches, pos_offset=cur - 1)
     return idx[:, T:]
 
 
