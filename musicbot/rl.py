@@ -77,6 +77,10 @@ def sample_continuations(model, prompts, max_new, temp=1.0, topk=40, topp=0.95, 
             kth = torch.topk(logits, min(topk, logits.size(-1)), dim=-1)
             logits[logits < kth.values[:, [-1]]] = -float("inf")
         probs = torch.softmax(logits, dim=-1)
+        if not torch.isfinite(probs).all():
+            probs = torch.nan_to_num(probs, nan=0.0, posinf=0.0, neginf=0.0)
+            s = probs.sum(dim=-1, keepdim=True)
+            probs = torch.where(s > 0, probs / s, torch.full_like(probs, 1.0 / probs.size(-1)))
         if topp:
             sp, si = torch.sort(probs, descending=True, dim=-1)
             cum = torch.cumsum(sp, dim=-1)
@@ -86,6 +90,7 @@ def sample_continuations(model, prompts, max_new, temp=1.0, topk=40, topp=0.95, 
             nxt = si.gather(-1, torch.multinomial(sp, 1)).squeeze(-1)
         else:
             nxt = torch.multinomial(probs, 1).squeeze(-1)
+        nxt = nxt.clamp(0, model.cfg.vocab - 1)
         idx = torch.cat([idx, nxt[:, None]], dim=1)
         cur += 1
         if (nxt == EOS).all():
@@ -116,8 +121,8 @@ def train_critic(critic, gen_model, data, steps, bs, lr, device, log=print, G=4,
         with torch.no_grad():
             seeds = torch.from_numpy(data.sample_batch(1, rng)[0][:, :64]).to(device).repeat(G, 1)
             fake = torch.cat([seeds, sample_continuations(gen_model, seeds, seg, device=device)], dim=1)
-        real_lab = torch.ones(bs, device=device)
-        fake_lab = torch.zeros(fake.size(0), device=device)
+        real_lab = torch.ones(bs, device=device) * 0.9
+        fake_lab = torch.zeros(fake.size(0), device=device) + 0.05
         x = torch.cat([real, fake], 0)
         lab = torch.cat([real_lab, fake_lab], 0)
         logit = critic(x[:, -critic.cfg.ctx :])
