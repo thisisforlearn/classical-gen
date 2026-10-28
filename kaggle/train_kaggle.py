@@ -33,6 +33,7 @@ assert torch.cuda.is_available(), "GPU required — enable GPU (T4 x2) in Kaggle
 dev = "cuda"
 ngpu = torch.cuda.device_count()
 con.print(f"GPU: {torch.cuda.get_device_name(0)} x{ngpu} · bf16={torch.cuda.is_bf16_supported()}")
+hf_ok = hf_check(hf_token(), log=con.print)
 
 WORK = "/kaggle/working"
 LOCAL = os.path.isdir(WORK) and os.environ.get("KAGGLE_KERNEL_RUN_TYPE") is not None
@@ -47,7 +48,7 @@ PRE_STEPS, PRE_SECONDS = 20000, 6.5 * 3600
 CKPT = os.path.join(OUT, "ckpt.pt")
 BUNDLE = os.path.join(OUT, "maestro_bundle.pt")
 ZIP = os.path.join(OUT, "maestro_bundle.zip")
-HF_REPO = "thisisforlearn/maestro-checkpoints"
+HF_REPO = "neko-i-am-a-cat/maestro-checkpoints"
 
 
 def hf_token():
@@ -59,6 +60,29 @@ def hf_token():
         return UserSecretsClient().get_secret("HF_TOKEN").strip()
     except Exception:
         return None
+
+
+def hf_check(tok, log=print):
+    if not tok:
+        log("[yellow]HF backup OFF — add a Kaggle secret named HF_TOKEN (Add-ons -> Secrets), "
+            "token type 'Write'[/]")
+        return False
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi(token=tok)
+        who = api.whoami()
+        role = (who.get("auth", {}).get("accessToken", {}) or {}).get("role", "?")
+        if role != "write":
+            log(f"[yellow]HF token is '{role}' — needs a 'Write' token for uploads. "
+                f"Create one: huggingface.co/settings/tokens[/]")
+            return False
+        api.create_repo(HF_REPO, repo_type="model", exist_ok=True)
+        log(f"[green]HF OK — logged in as [bold]{who.get('name')}[/] · "
+            f"backup repo live: huggingface.co/{HF_REPO}[/]")
+        return True
+    except Exception as e:
+        log(f"[yellow]HF token test failed ({e}) — backup disabled, training continues[/]")
+        return False
 
 
 def hf_fetch(name, dest, log=print):
@@ -106,8 +130,8 @@ if not os.path.exists(os.path.join(tok_dir, "packed.npy")) and inputs:
 if not os.path.exists(os.path.join(tok_dir, "packed.npy")):
     maestro_dir = download_maestro(DATA, log=con.print)
     mutopia_dir = download_mutopia(DATA, log=con.print)
-    tokenize_corpus([maestro_dir, mutopia_dir] if mutopia_dir else [maestro_dir], tok_dir,
-                    workers=4, log=con.print)
+    roots = [maestro_dir] + ([mutopia_dir] if mutopia_dir else [])
+    tokenize_corpus(roots[0], tok_dir, extra_roots=roots[1:], workers=4, log=con.print)
 data = PackedData(tok_dir, 1024)
 con.print(f"corpus: [bold]{data.tokens.size // 10**6}M[/] tokens")
 
@@ -118,7 +142,7 @@ con.print(f"generator: [bold]{sum(p.numel() for p in gen.parameters()) / 1e6:.0f
           f"critic: {sum(p.numel() for p in crit.parameters()) / 1e6:.0f}M params")
 
 # ---------------- resume detection ----------------
-tok = hf_token()
+tok = hf_token() if hf_ok else None
 prev_bundles = [BUNDLE] + (glob.glob("/kaggle/input/*/maestro_bundle.pt") if LOCAL else [])
 prev_ckpt = [CKPT] + (glob.glob("/kaggle/input/*/ckpt.pt") if LOCAL else [])
 if any(os.path.exists(p) for p in prev_bundles):

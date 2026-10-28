@@ -141,7 +141,9 @@ def download_mutopia(data_dir: str, log=print, limit_composers=None) -> Path:
     return d
 
 
-def tokenize_corpus(midi_root: str, out_dir: str, workers: int = None, log=print, extra_roots=None):
+def tokenize_corpus(midi_root, out_dir: str, workers: int = None, log=print, extra_roots=None):
+    if isinstance(midi_root, (list, tuple)):
+        midi_root, extra_roots = midi_root[0], list(midi_root[1:]) + list(extra_roots or [])
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     data_npz = out / "packed.npy"
