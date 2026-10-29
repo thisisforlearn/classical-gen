@@ -155,16 +155,23 @@ def orchestrate(midi_in, midi_out, seed=0, presets="gm", log=print):
         if dur >= bar_ticks // 2 or (i == 0):  # highlight long/first notes only
             play("Flute", p + 12, s, min(e, s + dur), 56, legato=0)
 
+    mel_hi = int(np.median([n[2] for n in notes])) + 14
     for b in range(n_bars):
         lo = b * bar_ticks
         deg = chord_of_bar[b]
         root, third, fifth = (key_pc + t for t in triads[deg])
-        play("Viola", third + 48, lo, lo + bar_ticks, 40)
-        play("Horn", fifth + 43, lo, lo + bar_ticks, 38)
+        lo_b, hi_b = b * bar_ticks, (b + 1) * bar_ticks
+        bar_max = max((n[2] for n in notes if lo_b <= n[0] < hi_b), default=mel_hi)
+        # overtone-series pyramid: wide low (roots+octaves), thirds only high (as tenths)
+        play("Contrabass", root + 24, lo, lo + 2 * bar_ticks, 54)
         play("Cello", root + 36, lo, lo + bar_ticks // 2, 58)
         play("Cello", (fifth if b % 2 else root) + 36, lo + bar_ticks // 2, lo + bar_ticks, 50)
-        if b % 2 == 0:
-            play("Contrabass", root + 24, lo, lo + 2 * bar_ticks, 54)
+        horn_p = _fit((root if b % 4 < 2 else fifth) + 43, 43, 55)  # low: root/fifth only, no third
+        play("Horn", horn_p, lo, lo + bar_ticks, 38)
+        viola_p = _fit(third + 60, 57, 74)  # third as a tenth — never low
+        if viola_p > min(bar_max, mel_hi) - 4:
+            viola_p = _fit(viola_p - 12, 57, 74)
+        play("Viola", viola_p, lo, lo + bar_ticks, 40)
         if b % 4 == 0:
             play("Timpani", (key_pc + (7 if b % 16 == 8 else 0)) % 12 + 36,
                  lo, lo + bar_ticks // 4, 60 if b % 16 == 0 else 44)
