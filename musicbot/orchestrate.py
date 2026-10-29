@@ -24,6 +24,8 @@ SEATING = {  # CC10 pan (0=hard left, 64=center, 127=hard right) + CC91 reverb s
     "Violin": (24, 26), "Flute": (64, 40), "Viola": (48, 62), "Horn": (78, 72),
     "Cello": (98, 48), "Contrabass": (110, 55), "Timpani": (64, 82),
 }
+GM_NAME = {"Violin": VIOLIN, "Flute": FLUTE, "Viola": VIOLA, "Horn": HORN,
+           "Cello": CELLO, "Contrabass": BASS, "Timpani": TIMPANI}
 PRESETS = {
     "gm": {"Violin": 40, "Flute": 73, "Viola": 41, "Horn": 60, "Cello": 42, "Contrabass": 43, "Timpani": 47},
     "sonatina": {"Violin": 27, "Flute": 52, "Viola": 41, "Horn": 3, "Cello": 38, "Contrabass": 35, "Timpani": 23},
@@ -126,7 +128,7 @@ def orchestrate(midi_in, midi_out, seed=0, presets="gm", log=print):
 
     def play(name, pitch, t0, t1, vel, legato=0):
         tr, ch, prog = tracks[name]
-        pitch = _fit(pitch, *RANGES[prog])
+        pitch = _fit(pitch, *RANGES[GM_NAME[name]])
         if ch not in prog_done:
             tr.append(Message("program_change", channel=ch, program=prog, time=0))
             last_t[ch] = 0
