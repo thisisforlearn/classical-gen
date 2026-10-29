@@ -191,7 +191,7 @@ def cmd_run(variant, work, steps):
     torch.manual_seed(0)
     data, built_locally = get_corpus(variant, work, n_cpu)
     con.print(f"corpus: {data.n_tokens:,} tokens / {data.n_pieces} pieces")
-    gen = GPT(**GCFG).to(dev)
+    gen = GPT(GCFG).to(dev)
     n_params = sum(p.numel() for p in gen.parameters())
     con.print(f"model: {n_params / 1e6:.1f}M params · variant [bold]{variant}[/] · "
               f"{steps} steps · bs {bs} · {'DataParallel x%d' % ngpu if ngpu > 1 else 'single GPU'}")
