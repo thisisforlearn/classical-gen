@@ -1,10 +1,11 @@
 # ============================================================
 #  Maestro orchestrator — piano reduction -> General MIDI orchestra
-#  Auto-harmonizes the monophonic line and assigns orchestra parts.
+#  Auto-harmonize + instrument assignment + humanized performance
 #  Author: Vaibhav (sole author; final authority on this project)
 #  License: GPL-3.0-only <https://www.gnu.org/licenses/gpl-3.0.html>
 # ============================================================
 from __future__ import annotations
+import random
 import numpy as np
 from mido import MidiFile, MidiTrack, Message, MetaMessage
 
@@ -19,6 +20,10 @@ MAJOR_TRIADS = [[0, 4, 7], [2, 5, 9], [4, 7, 11], [5, 9, 12], [7, 11, 14], [9, 1
 MINOR_TRIADS = [[0, 3, 7], [2, 5, 8], [3, 7, 10], [5, 8, 12], [7, 10, 14], [8, 12, 15], [10, 14, 17]]
 K_MAJ = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
 K_MIN = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
+SEATING = {  # CC10 pan (0=hard left, 64=center, 127=hard right) + CC91 reverb send
+    VIOLIN: (24, 26), FLUTE: (64, 40), VIOLA: (48, 62), HORN: (78, 72),
+    CELLO: (98, 48), BASS: (110, 55), TIMPANI: (64, 82),
+}
 
 
 def _load_notes(midi_path):
@@ -66,7 +71,8 @@ def _fit(pitch, lo, hi):
     return pitch
 
 
-def orchestrate(midi_in, midi_out, log=print):
+def orchestrate(midi_in, midi_out, seed=0, log=print):
+    rng = random.Random(seed * 7919 + 3)
     notes, tpb, tempo, ts = _load_notes(midi_in)
     if not notes:
         raise ValueError(f"no notes in {midi_in}")
@@ -82,77 +88,85 @@ def orchestrate(midi_in, midi_out, log=print):
     last_deg = 0
     for b in range(n_bars):
         lo, hi = b * bar_ticks, (b + 1) * bar_ticks
-        pcs = {n[2] % 12 for n in notes if lo <= n[0] < hi}
-        best, best_s = last_deg, -1
+        w = np.zeros(12)
+        for (s, e, p, _) in notes:
+            if lo <= s < hi:
+                w[p % 12] += min(e, hi) - s
+        best, best_s = last_deg, -1e9
         for d in range(7):
             ch = {(key_pc + t) % 12 for t in triads[d]}
-            s = len(pcs & ch) - (0.6 if d == last_deg else 0.0)
+            s = sum(w[pc] for pc in ch) / max(1.0, w.sum())
+            s -= 0.08 if d == last_deg else 0.0
             if s > best_s:
                 best, best_s = d, s
-        if (b % 8) == 7:
-            best = 4 if not minor else 4
+        if b % 8 == 7:
+            best = 4
         chord_of_bar.append(best)
         last_deg = best
 
-    prog_done, last_t = set(), {}
+    tracks, last_t, prog_done = {}, {}, set()
 
-    def note_on(tr, ch, prog, pitch, t0, t1, vel):
+    def track(name, ch, prog):
+        tr = MidiTrack()
+        pan, rev = SEATING[prog]
+        tr.append(MetaMessage("track_name", name=name, time=0))
+        tr.append(Message("control_change", channel=ch, control=10, value=pan, time=0))
+        tr.append(Message("control_change", channel=ch, control=91, value=rev, time=0))
+        tracks[name] = (tr, ch, prog)
+        return tr
+
+    for name, ch, prog in (("Violin", 0, VIOLIN), ("Flute", 1, FLUTE), ("Viola", 2, VIOLA),
+                           ("Horn", 3, HORN), ("Cello", 4, CELLO), ("Contrabass", 5, BASS),
+                           ("Timpani", 6, TIMPANI)):
+        track(name, ch, prog)
+
+    def play(name, pitch, t0, t1, vel, legato=0):
+        tr, ch, prog = tracks[name]
         pitch = _fit(pitch, *RANGES[prog])
         if ch not in prog_done:
             tr.append(Message("program_change", channel=ch, program=prog, time=0))
             last_t[ch] = 0
             prog_done.add(ch)
-        t0 = max(int(t0), last_t[ch])
-        t1 = max(int(t1), t0 + tpb // 8)
-        tr.append(Message("note_on", channel=ch, note=int(pitch), velocity=int(vel), time=t0 - last_t[ch]))
+        jit = rng.randint(-3, 3)
+        t0 = max(int(t0) + jit, last_t[ch])
+        t1 = max(int(t1) + rng.randint(-2, 4) + legato, t0 + tpb // 8)
+        vel = int(np.clip(vel + rng.randint(-6, 6), 18, 118))
+        tr.append(Message("note_on", channel=ch, note=int(pitch), velocity=vel, time=t0 - last_t[ch]))
         last_t[ch] = t0
         tr.append(Message("note_off", channel=ch, note=int(pitch), velocity=0, time=t1 - t0))
         last_t[ch] = t1
 
-    tracks = {}
-
-    def track(name, ch, prog):
-        tr = MidiTrack()
-        tr.append(MetaMessage("track_name", name=name, time=0))
-        tracks[name] = (tr, ch, prog)
-        return tr
-
-    track("Violin", 0, VIOLIN)
-    track("Flute", 1, FLUTE)
-    track("Viola", 2, VIOLA)
-    track("Horn", 3, HORN)
-    track("Cello", 4, CELLO)
-    track("Contrabass", 5, BASS)
-    track("Timpani", 6, TIMPANI)
-
     phrase = 0
+    n_mel = len(notes)
     for i, (s, e, p, _) in enumerate(notes):
-        note_on(tracks["Violin"][0], 0, VIOLIN, p, s, e, max(40, min(110, int(70 + (p % 12)))))
-        if i > 0 and s - notes[i - 1][1] > tpb:  # rest = phrase boundary
+        if i > 0 and s - notes[i - 1][1] > tpb:
             phrase += 1
-        if phrase % 2 == 0:
-            note_on(tracks["Flute"][0], 1, FLUTE, p + 12, s, e, 62)
+        pos_in_bar = (s % bar_ticks) / bar_ticks
+        arc = 1.0 - 0.25 * pos_in_bar
+        base = 66 + 30 * arc
+        play("Violin", p, s, e, base, legato=tpb // 16)
+        dur = e - s
+        if dur >= bar_ticks // 2 or (i == 0):  # highlight long/first notes only
+            play("Flute", p + 12, s, min(e, s + dur), 56, legato=0)
 
     for b in range(n_bars):
         lo = b * bar_ticks
         deg = chord_of_bar[b]
-        root = key_pc + triads[deg][0]
-        third = key_pc + triads[deg][1]
-        fifth = key_pc + triads[deg][2]
-        note_on(tracks["Viola"][0], 2, VIOLA, third + 48, lo, lo + bar_ticks, 52)
-        note_on(tracks["Horn"][0], 3, HORN, fifth + 43, lo, lo + bar_ticks, 48)
-        note_on(tracks["Cello"][0], 4, CELLO, root + 36, lo, lo + bar_ticks // 2, 68)
-        note_on(tracks["Cello"][0], 4, CELLO, root + 36, lo + bar_ticks // 2, lo + bar_ticks, 60)
-        note_on(tracks["Contrabass"][0], 5, BASS, root + 24, lo, lo + bar_ticks, 62)
+        root, third, fifth = (key_pc + t for t in triads[deg])
+        play("Viola", third + 48, lo, lo + bar_ticks, 40)
+        play("Horn", fifth + 43, lo, lo + bar_ticks, 38)
+        play("Cello", root + 36, lo, lo + bar_ticks // 2, 58)
+        play("Cello", (fifth if b % 2 else root) + 36, lo + bar_ticks // 2, lo + bar_ticks, 50)
+        if b % 2 == 0:
+            play("Contrabass", root + 24, lo, lo + 2 * bar_ticks, 54)
         if b % 4 == 0:
-            note_on(tracks["Timpani"][0], 6, TIMPANI, (key_pc + (7 if b % 16 == 8 else 0)) % 12 + 36,
-                    lo, lo + bar_ticks // 4, 64 if b % 16 == 0 else 48)
+            play("Timpani", (key_pc + (7 if b % 16 == 8 else 0)) % 12 + 36,
+                 lo, lo + bar_ticks // 4, 60 if b % 16 == 0 else 44)
 
     out = MidiFile(ticks_per_beat=tpb)
     for name in ("Violin", "Flute", "Viola", "Horn", "Cello", "Contrabass", "Timpani"):
-        tr, _, _ = tracks[name]
-        out.tracks.append(tr)
+        out.tracks.append(tracks[name][0])
     out.tracks[0].insert(0, MetaMessage("set_tempo", tempo=tempo, time=0))
     out.save(midi_out)
-    log(f"orchestra MIDI: {midi_out}  (7 parts)")
+    log(f"orchestra MIDI: {midi_out}  (7 parts, humanized, seated + hall reverb)")
     return midi_out

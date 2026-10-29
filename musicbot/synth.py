@@ -67,7 +67,10 @@ def render_wav(midi_path, wav_path, log=print):
     if fs and sf2:
         log(f"fluidsynth render ({Path(sf2).name})...")
         subprocess.run(
-            [fs, "-ni", "-g", "0.7", "-r", str(SR), "-F", str(wav_path), sf2, str(midi_path)],
+            [fs, "-ni", "-g", "0.7", "-R", "1",
+             "-o", "synth.reverb.room-size=0.78", "-o", "synth.reverb.damping=0.35",
+             "-o", "synth.reverb.width=0.75", "-o", "synth.reverb.level=0.65",
+             "-r", str(SR), "-F", str(wav_path), sf2, str(midi_path)],
             check=True, capture_output=True, timeout=180,
         )
         log(f"wrote {wav_path}")
