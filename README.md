@@ -104,21 +104,25 @@ Everything is published to the public repo
 Variants: `control` (base recipe) · `muon` (Muon optimizer on hidden layers —
 modded-nanoGPT speedrun trick) · `data` (+GiantMIDI-Piano, 10,855 pieces) · `both`.
 
-**Session 1** (GPU 0 builds data packs, GPU 1 trains the control):
+**Session 1** — prep runs in the background while the **control variant trains in the
+foreground with live progress bars** (DataParallel over both GPUs, batch scaled to GPU count):
 
 ```
 !test -d classical-gen || git clone https://github.com/thisisforlearn/classical-gen
-!pip install -q mido rich gdown huggingface_hub
+!pip install -q mido rich gdown huggingface_hub psutil
 !apt-get install -y -qq fluidsynth >/dev/null 2>&1
 !curl -sL --create-dirs -o classical-gen/soundfonts/MuseScore_General.sf3 \
   "https://huggingface.co/datasets/mileslilly/soundfonts/resolve/main/MuseScore_General.sf3"
-!cd classical-gen && { CUDA_VISIBLE_DEVICES=0 python kaggle/train_experiment.py prep > prep.log 2>&1 & \
-  CUDA_VISIBLE_DEVICES=1 python kaggle/train_experiment.py run control > control.log 2>&1 & wait; }
-!tail -3 classical-gen/*.log
+!cd classical-gen && python kaggle/train_experiment.py prep 2 > prep.log 2>&1 &
+!cd classical-gen && python kaggle/train_experiment.py run control
 ```
 
-**Session 2**: same cell but the last line runs `run muon` on GPU 0 and `run data` on GPU 1.
-**Session 3**: `run both` + `run control 3000` (scaling check). Winners get stacked in later rounds.
+Watch the background prep anytime with: `!tail -3 classical-gen/prep.log`
+
+**Sessions 2–4**: same first four lines, then one foreground job per session:
+`run muon` · `run data` · `run both` (packs download from the hub in seconds).
+Optional scaling check: `run control 3000`.
+Winners get stacked in later rounds.
 
 Judging is **blind**: download the sample zips, listen, rate 1–10, then check `results/`
 to see which variant won.

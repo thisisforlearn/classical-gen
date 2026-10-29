@@ -1,11 +1,13 @@
 # ============================================================
 #  Maestro Experiment Lab — tiny fast A/B training on Kaggle
-#  One variant per GPU, fixed token budget, blind-sample zips,
-#  everything published to the public HF experiments repo.
+#  One variant at a time in the FOREGROUND with live rich progress
+#  bars, DataParallel over every visible GPU, batch scaled to GPU
+#  count, CPUs maxed for tokenization. Everything published to the
+#  public HF experiments repo.
 #
 #  usage:
 #    python train_experiment.py prep              # build + upload data packs (once)
-#    python train_experiment.py run <variant>     # control | muon | data | both
+#    python train_experiment.py run <variant>     # control | muon | data | both  [steps]
 #
 #  Author: Vaibhav Agarwal (@thisisforlearn) - sole author; final authority on this project
 #  License: GPL-3.0-only <https://www.gnu.org/licenses/gpl-3.0.html>
@@ -29,7 +31,7 @@ REPO = "neko-i-am-a-cat/maestro-experiments"   # public HF dataset repo
 GCFG = dict(GEN_CFG, d=768, n_layer=12, n_head=12, ff=2048, ctx=1024, drop=0.1)
 CTX = 1024
 STEPS_DEFAULT = 1500            # fixed token budget => fair A/B (same tokens seen)
-BS = 12
+BS_PER_GPU = 12
 LR = 3e-4
 SEEDS = [11, 22, 33]            # fixed sample seeds across ALL variants
 SAMPLE_MIN = 0.66               # ~40 s per sample
@@ -38,6 +40,20 @@ GIANT_FOLDER = "https://drive.google.com/drive/folders/1Stz3CAvMoplo79LR5I3onMWR
 SF3_URL = "https://huggingface.co/datasets/mileslilly/soundfonts/resolve/main/MuseScore_General.sf3"
 
 con = Console(highlight=False)
+
+
+def sys_report():
+    n_cpu = os.cpu_count() or 4
+    torch.set_num_threads(n_cpu)
+    try:
+        import psutil
+        ram = f"{psutil.virtual_memory().total / 2**30:.0f} GB RAM"
+    except Exception:
+        ram = "RAM ?"
+    ngpu = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    gpus = [torch.cuda.get_device_name(i) for i in range(ngpu)] or ["none"]
+    con.print(f"[bold]system:[/] {n_cpu} vCPUs · {ram} · {ngpu} GPU(s): {', '.join(gpus)}")
+    return n_cpu, ngpu
 
 
 def hf():
@@ -52,13 +68,17 @@ def hf():
         raise SystemExit("HF_TOKEN not found (add it to Kaggle Secrets)")
     from huggingface_hub import HfApi
     api = HfApi(token=tok)
-    api.create_repo(REPO, repo_type="dataset", exist_ok=True, private=False)
+    who = api.whoami()["name"]
+    exists = api.repo_exists(REPO, repo_type="dataset")
+    if not exists:
+        api.create_repo(REPO, repo_type="dataset", exist_ok=True, private=False)
+    con.print(f"[bold]HF:[/] logged in as [cyan]{who}[/] · repo [cyan]{REPO}[/] "
+              f"({'already exists' if exists else '[green]created new[/]'})")
     return api
 
 
 def hf_up(api, path, name, log=print):
-    api.upload_file(path_or_fileobj=str(path), path_in_repo=name, repo_id=REPO,
-                    repo_type="dataset")
+    api.upload_file(path_or_fileobj=str(path), path_in_repo=name, repo_type="dataset")
     log(f"uploaded: {name}")
 
 
@@ -69,24 +89,24 @@ def hf_down(name, dest_dir, log=print):
 
 
 # ---------------------------------------------------------------- data packs
-def _tokenize(root_list, out_dir, log=print):
+def _tokenize(root_list, out_dir, workers, log=print):
     out_dir.mkdir(parents=True, exist_ok=True)
-    workers = max(2, (os.cpu_count() or 4) // 2)  # halve cores: two lab jobs share a session
     tokenize_corpus([str(r) for r in root_list], str(out_dir), workers=workers, log=log)
     return out_dir
 
 
-def cmd_prep(work):
+def cmd_prep(work, workers):
     """Build pack_base (MAESTRO+Mutopia) and pack_giant (GiantMIDI), upload both."""
     api = hf()
+    sys_report()
     packs = work / "packs"
     # ---- base pack
     base_dir = packs / "base"
     if not (base_dir / "packed.npy").exists():
-        con.print("[bold]building base pack (MAESTRO + Mutopia)...[/]")
+        con.print("[bold cyan]building base pack (MAESTRO + Mutopia)...[/]")
         maestro = download_maestro(str(work / "dl"), log=con.print)
         mutopia = download_mutopia(str(work / "dl"), log=con.print)
-        _tokenize([maestro, mutopia], base_dir, log=con.print)
+        _tokenize([maestro, mutopia], base_dir, workers, log=con.print)
     meta = json.loads((base_dir / "meta.json").read_text())
     con.print(f"base pack: {meta['n_tokens']:,} tokens / {meta['n_pieces']} pieces")
     hf_up(api, base_dir / "packed.npy", "base/packed.npy", con.print)
@@ -94,7 +114,7 @@ def cmd_prep(work):
     # ---- giant pack
     giant_dir = packs / "giant"
     if not (giant_dir / "packed.npy").exists():
-        con.print("[bold]downloading GiantMIDI-Piano (193 MB)...[/]")
+        con.print("[bold cyan]downloading GiantMIDI-Piano (193 MB)...[/]")
         raw = work / "giantmidi_raw"
         raw.mkdir(parents=True, exist_ok=True)
         r = subprocess.run([sys.executable, "-m", "gdown", "--folder", GIANT_FOLDER,
@@ -108,7 +128,7 @@ def cmd_prep(work):
             con.print("[bold red]GiantMIDI download failed — skip data variants this round[/]")
             return
         con.print(f"GiantMIDI: {len(mids)} MIDI files")
-        _tokenize([Path(m) for m in mids][:8000], giant_dir, log=con.print)
+        _tokenize([Path(m) for m in mids][:8000], giant_dir, workers, log=con.print)
         meta = json.loads((giant_dir / "meta.json").read_text())
         con.print(f"giant pack: {meta['n_tokens']:,} tokens / {meta['n_pieces']} pieces")
     hf_up(api, giant_dir / "packed.npy", "giant/packed.npy", con.print)
@@ -116,7 +136,7 @@ def cmd_prep(work):
     con.print("[bold green]prep done[/] — packs are on the hub for every future session")
 
 
-def get_corpus(variant, work):
+def get_corpus(variant, work, workers):
     """corpus for a variant: giant pack for data/both, base otherwise; local fallback."""
     d = work / f"corpus_{variant}"
     want_giant = variant in ("data", "both")
@@ -134,7 +154,7 @@ def get_corpus(variant, work):
     if not (base / "packed.npy").exists():
         maestro = download_maestro(str(work / "dl"), log=con.print)
         mutopia = download_mutopia(str(work / "dl"), log=con.print)
-        _tokenize([maestro, mutopia], base, log=con.print)
+        _tokenize([maestro, mutopia], base, workers, log=con.print)
     return PackedData(base, CTX)
 
 
@@ -162,21 +182,18 @@ def setup_sound(work):
 def cmd_run(variant, work, steps):
     assert variant in ("control", "muon", "data", "both"), variant
     api = hf()
-    dev = "cuda"
+    n_cpu, ngpu = sys_report()
+    dev = "cuda" if ngpu else "cpu"
+    bs = BS_PER_GPU * max(1, ngpu)
     torch.manual_seed(0)
-    data = get_corpus(variant, work)
+    data = get_corpus(variant, work, n_cpu)
     con.print(f"corpus: {data.n_tokens:,} tokens / {data.n_pieces} pieces")
     gen = GPT(**GCFG).to(dev)
     n_params = sum(p.numel() for p in gen.parameters())
-    con.print(f"model: {n_params / 1e6:.1f}M params · variant [bold]{variant}[/] · {steps} steps")
-
-    losses = []
-
-    def ckpt(model, step, ema):
-        losses.append((step, round(float(ema_loss[0]), 4)))
+    con.print(f"model: {n_params / 1e6:.1f}M params · variant [bold]{variant}[/] · "
+              f"{steps} steps · bs {bs} · {'DataParallel x%d' % ngpu if ngpu > 1 else 'single GPU'}")
 
     ema_loss = [0.0]
-    t0 = time.time()
 
     def log(line):
         con.print(line)
@@ -185,10 +202,11 @@ def cmd_run(variant, work, steps):
         except Exception:
             pass
 
-    _, ema = pretrain(gen, data, steps, bs=BS, lr=LR, device=dev, bf16=True,
-                      amp_device="cuda", log=log, ckpt_fn=ckpt, ckpt_every=250,
-                      max_seconds=TRAIN_SECONDS_CAP, use_bar=True, ls=0.1,
-                      opt=build_opt(variant, gen))
+    t0 = time.time()
+    _, ema = pretrain(gen, data, steps, bs=bs, lr=LR, device=dev, bf16=ngpu > 0,
+                      amp_device=dev, parallel=ngpu > 1, log=log,
+                      ckpt_every=250, max_seconds=TRAIN_SECONDS_CAP, use_bar=True,
+                      ls=0.1, opt=build_opt(variant, gen))
     wall = time.time() - t0
     ema.copy_to(gen)
 
@@ -199,12 +217,12 @@ def cmd_run(variant, work, steps):
     results = dict(variant=variant, steps=steps, params_M=round(n_params / 1e6, 1),
                    corpus_tokens=int(data.n_tokens), wall_min=round(wall / 60, 1),
                    final_loss=round(ema_loss[0], 4), seeds=SEEDS,
-                   date=time.strftime("%Y-%m-%d %H:%M"))
+                   gpus=ngpu, date=time.strftime("%Y-%m-%d %H:%M"))
     for s in SEEDS:
         try:
             mid = out / f"s{s}.mid"
-            toks = compose(gen, None, minutes=SAMPLE_MIN, K=1, device=dev, precision="fp32",
-                           seed=s, log=con.print)
+            toks = compose(gen, None, minutes=SAMPLE_MIN, K=1, device=dev,
+                           precision="fp32" if ngpu else "int8", seed=s, log=con.print)
             decode_tokens(toks).save(str(mid))
             wav = out / f"s{s}.wav"
             synth.render_wav(mid, wav, log=con.print)
@@ -238,9 +256,11 @@ def cmd_run(variant, work, steps):
 if __name__ == "__main__":
     work = Path("/kaggle/working") if Path("/kaggle/working").exists() else Path("lab_work")
     work.mkdir(exist_ok=True, parents=True)
-    if len(sys.argv) < 2 or sys.argv[1] == "prep":
-        cmd_prep(work)
-    elif sys.argv[1] == "run":
+    n_cpu = os.cpu_count() or 4
+    if len(sys.argv) >= 2 and sys.argv[1] == "prep":
+        workers = int(sys.argv[2]) if len(sys.argv) > 2 else n_cpu
+        cmd_prep(work, workers)
+    elif len(sys.argv) >= 2 and sys.argv[1] == "run":
         variant = sys.argv[2] if len(sys.argv) > 2 else "control"
         steps = int(sys.argv[3]) if len(sys.argv) > 3 else STEPS_DEFAULT
         cmd_run(variant, work, steps)
