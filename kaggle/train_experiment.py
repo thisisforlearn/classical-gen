@@ -93,7 +93,8 @@ def hf():
 def hf_up(api, path, name, log=print, tries=3):
     for i in range(tries):
         try:
-            api.upload_file(path_or_fileobj=str(path), path_in_repo=name, repo_type="dataset")
+            api.upload_file(path_or_fileobj=str(path), path_in_repo=name,
+                            repo_id=REPO, repo_type="dataset")
             log(f"uploaded: {name}")
             return True
         except Exception as e:
