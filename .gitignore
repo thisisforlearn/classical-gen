@@ -8,3 +8,4 @@ build/
 dist/
 *.spec
 .ipynb_checkpoints/
+soundfonts/

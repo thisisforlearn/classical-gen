@@ -66,8 +66,21 @@ python -m musicbot generate --minutes 16 --candidates 6 --seed 7
 python -m musicbot render              # re-render last MIDI
 ```
 
-Audio uses **FluidSynth + FluidR3 concert-grand soundfont** when available
-(installed here), falling back to the built-in numpy piano synth.
+Audio uses **FluidSynth** when available, falling back to the built-in numpy piano synth.
+
+### Soundfont setup (one-time, ~470 MB — not stored in the repo)
+
+The orchestral renderer uses the free **Sonatina Symphonic Orchestra** soundfont,
+downloaded on demand (kept out of git so the repo stays small):
+
+```bash
+mkdir -p ~/music-bot/soundfonts && curl -L -o \
+  ~/music-bot/soundfonts/Sonatina_Symphonic_Orchestra.sf2 \
+  "https://huggingface.co/datasets/mileslilly/soundfonts/resolve/main/Sonatina_Symphonic_Orchestra.sf2"
+```
+
+Without it, rendering falls back to `MuseScore_General.sf2` or the system FluidR3
+piano font.
 
 Local CPU fallback training (no Kaggle needed; measured 0.4k tok/s here vs
 ~50-100x on T4 x2):
