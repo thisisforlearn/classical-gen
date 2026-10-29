@@ -133,7 +133,7 @@ def train_critic(critic, gen_model, data, steps, bs, lr, device, log=print, G=4,
         opt.step()
         ema = loss.item() if ema is None else 0.95 * ema + 0.05 * loss.item()
         with torch.no_grad():
-            acc = (((logit > 0).float() == lab).float().mean().item())
+            acc = (((logit > 0).float() == (lab > 0.5).float()).float().mean().item())
         if bar is not None:
             bar.update(ptask, completed=step, m=f"bce {ema:.3f} · acc {acc:.2f}")
         elif step % 25 == 0 or step == 1:
