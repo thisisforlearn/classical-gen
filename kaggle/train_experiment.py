@@ -95,22 +95,24 @@ def _tokenize(root_list, out_dir, workers, log=print):
     return out_dir
 
 
-def cmd_prep(work, workers):
+def cmd_prep(work, workers, giant_only=False):
     """Build pack_base (MAESTRO+Mutopia) and pack_giant (GiantMIDI), upload both."""
     api = hf()
     sys_report()
     packs = work / "packs"
-    # ---- base pack
     base_dir = packs / "base"
-    if not (base_dir / "packed.npy").exists():
-        con.print("[bold cyan]building base pack (MAESTRO + Mutopia)...[/]")
-        maestro = download_maestro(str(work / "dl"), log=con.print)
-        mutopia = download_mutopia(str(work / "dl"), log=con.print)
-        _tokenize([maestro, mutopia], base_dir, workers, log=con.print)
-    meta = json.loads((base_dir / "meta.json").read_text())
-    con.print(f"base pack: {meta['n_tokens']:,} tokens / {meta['n_pieces']} pieces")
-    hf_up(api, base_dir / "packed.npy", "base/packed.npy", con.print)
-    hf_up(api, base_dir / "meta.json", "base/meta.json", con.print)
+    if not giant_only:
+        if not (base_dir / "packed.npy").exists():
+            con.print("[bold cyan]building base pack (MAESTRO + Mutopia)...[/]")
+            maestro = download_maestro(str(work / "dl"), log=con.print)
+            mutopia = download_mutopia(str(work / "dl"), log=con.print)
+            _tokenize([maestro, mutopia], base_dir, workers, log=con.print)
+        meta = json.loads((base_dir / "meta.json").read_text())
+        con.print(f"base pack: {meta['n_tokens']:,} tokens / {meta['n_pieces']} pieces")
+        hf_up(api, base_dir / "packed.npy", "base/packed.npy", con.print)
+        hf_up(api, base_dir / "meta.json", "base/meta.json", con.print)
+    else:
+        con.print("[dim]prep-giant: skipping base pack (control job uploads it)[/]")
     # ---- giant pack
     giant_dir = packs / "giant"
     if not (giant_dir / "packed.npy").exists():
@@ -137,7 +139,8 @@ def cmd_prep(work, workers):
 
 
 def get_corpus(variant, work, workers):
-    """corpus for a variant: giant pack for data/both, base otherwise; local fallback."""
+    """corpus for a variant: giant pack for data/both, base otherwise; local fallback.
+    Returns (PackedData, built_locally) so the run can upload a fresh base pack."""
     d = work / f"corpus_{variant}"
     want_giant = variant in ("data", "both")
     names = (["giant/packed.npy", "giant/meta.json"] if want_giant
@@ -147,7 +150,7 @@ def get_corpus(variant, work, workers):
         for n in names:
             hf_down(n, d, con.print)
         src = d / names[0].split("/")[0]
-        return PackedData(src, CTX)
+        return PackedData(src, CTX), False
     except Exception as e:
         con.print(f"[yellow]pack download failed ({e}) — tokenizing locally[/]")
     base = work / "corpus_local"
@@ -155,7 +158,7 @@ def get_corpus(variant, work, workers):
         maestro = download_maestro(str(work / "dl"), log=con.print)
         mutopia = download_mutopia(str(work / "dl"), log=con.print)
         _tokenize([maestro, mutopia], base, workers, log=con.print)
-    return PackedData(base, CTX)
+    return PackedData(base, CTX), True
 
 
 # ---------------------------------------------------------------- training
@@ -186,7 +189,7 @@ def cmd_run(variant, work, steps):
     dev = "cuda" if ngpu else "cpu"
     bs = BS_PER_GPU * max(1, ngpu)
     torch.manual_seed(0)
-    data = get_corpus(variant, work, n_cpu)
+    data, built_locally = get_corpus(variant, work, n_cpu)
     con.print(f"corpus: {data.n_tokens:,} tokens / {data.n_pieces} pieces")
     gen = GPT(**GCFG).to(dev)
     n_params = sum(p.numel() for p in gen.parameters())
@@ -245,6 +248,16 @@ def cmd_run(variant, work, steps):
             z.write(f, arcname=f"{variant}/{f.name}")
     hf_up(api, zpath, f"samples/{zname}", con.print)
     hf_up(api, out / "results.json", f"results/{variant}_{steps}.json", con.print)
+    # publish the base pack if this job built it locally (future sessions skip tokenizing)
+    if built_locally and variant not in ("data", "both"):
+        try:
+            base = (work / "corpus_local")
+            meta = json.loads((base / "meta.json").read_text())
+            con.print(f"publishing base pack ({meta['n_tokens']:,} tokens) for future sessions...")
+            hf_up(api, base / "packed.npy", "base/packed.npy", con.print)
+            hf_up(api, base / "meta.json", "base/meta.json", con.print)
+        except Exception as e:
+            con.print(f"[yellow]base pack upload skipped: {e}[/]")
     ck = work / f"ckpt_{variant}.pt"
     torch.save({"gen_cfg": GCFG, "gen": gen.state_dict(),
                 "meta": {"variant": variant, "steps": steps, "author": "Vaibhav Agarwal",
@@ -257,9 +270,9 @@ if __name__ == "__main__":
     work = Path("/kaggle/working") if Path("/kaggle/working").exists() else Path("lab_work")
     work.mkdir(exist_ok=True, parents=True)
     n_cpu = os.cpu_count() or 4
-    if len(sys.argv) >= 2 and sys.argv[1] == "prep":
+    if len(sys.argv) >= 2 and sys.argv[1] in ("prep", "prep-giant"):
         workers = int(sys.argv[2]) if len(sys.argv) > 2 else n_cpu
-        cmd_prep(work, workers)
+        cmd_prep(work, workers, giant_only=(sys.argv[1] == "prep-giant"))
     elif len(sys.argv) >= 2 and sys.argv[1] == "run":
         variant = sys.argv[2] if len(sys.argv) > 2 else "control"
         steps = int(sys.argv[3]) if len(sys.argv) > 3 else STEPS_DEFAULT

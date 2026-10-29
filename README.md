@@ -104,22 +104,17 @@ Everything is published to the public repo
 Variants: `control` (base recipe) · `muon` (Muon optimizer on hidden layers —
 modded-nanoGPT speedrun trick) · `data` (+GiantMIDI-Piano, 10,855 pieces) · `both`.
 
-**Session 1** — prep runs in the background while the **control variant trains in the
-foreground with live progress bars** (DataParallel over both GPUs, batch scaled to GPU count):
+**Session 1** — one line. GiantMIDI prep runs in the background; the **control variant
+trains in the foreground with live progress bars** (DataParallel over both GPUs), then
+uploads the base pack so every future session skips tokenizing entirely:
 
 ```
-!test -d classical-gen || git clone https://github.com/thisisforlearn/classical-gen
-!pip install -q mido rich gdown huggingface_hub psutil
-!apt-get install -y -qq fluidsynth >/dev/null 2>&1
-!curl -sL --create-dirs -o classical-gen/soundfonts/MuseScore_General.sf3 \
-  "https://huggingface.co/datasets/mileslilly/soundfonts/resolve/main/MuseScore_General.sf3"
-!cd classical-gen && python kaggle/train_experiment.py prep 2 > prep.log 2>&1 &
-!cd classical-gen && python kaggle/train_experiment.py run control
+!test -d classical-gen || git clone -q https://github.com/thisisforlearn/classical-gen; pip install -q mido rich gdown huggingface_hub psutil; (apt-get update -qq && apt-get install -y -qq fluidsynth) >/dev/null 2>&1; curl -sL --create-dirs -o classical-gen/soundfonts/MuseScore_General.sf3 "https://huggingface.co/datasets/mileslilly/soundfonts/resolve/main/MuseScore_General.sf3"; (cd classical-gen && python kaggle/train_experiment.py prep-giant 2 > prep.log 2>&1 &); cd classical-gen && python kaggle/train_experiment.py run control
 ```
 
 Watch the background prep anytime with: `!tail -3 classical-gen/prep.log`
 
-**Sessions 2–4**: same first four lines, then one foreground job per session:
+**Sessions 2–4**: same one-liner with the last part swapped:
 `run muon` · `run data` · `run both` (packs download from the hub in seconds).
 Optional scaling check: `run control 3000`.
 Winners get stacked in later rounds.
