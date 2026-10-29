@@ -163,11 +163,14 @@ def compose(gen, crit, minutes=16.0, K=4, temp=1.0, topk=20, topp=0.95, device="
                 seg = _cut_section(cont[k].tolist())
                 if len(seg) < 48:
                     continue
-                full = torch.tensor((prompt + seg.tolist())[-512:], dtype=torch.long)[None].to(device)
-                with torch.no_grad():
-                    sc = torch.sigmoid(crit(full)).item()
                 th = theory_reward(seg)
-                s = sc + 0.5 * th
+                if crit is not None:
+                    full = torch.tensor((prompt + seg.tolist())[-512:], dtype=torch.long)[None].to(device)
+                    with torch.no_grad():
+                        sc = torch.sigmoid(crit(full)).item()
+                    s = sc + 0.5 * th
+                else:
+                    s = th
                 if s > best_s:
                     best, best_s = seg, s
             if best is None:

@@ -48,9 +48,10 @@ class EMA:
 
 
 def pretrain(model, data, steps, bs, lr, device, bf16=True, log=print, ckpt_fn=None, ckpt_every=500,
-             amp_device="cpu", parallel=False, accum=1, max_seconds=None, use_bar=False, ls=0.0):
+             amp_device="cpu", parallel=False, accum=1, max_seconds=None, use_bar=False, ls=0.0, opt=None):
     model.to(device).train()
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1, foreach=True)
+    if opt is None:
+        opt = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1, foreach=True)
     net = model
     if parallel and device == "cuda" and torch.cuda.device_count() > 1:
         net = torch.nn.DataParallel(model, device_ids=list(range(torch.cuda.device_count())))
@@ -71,7 +72,7 @@ def pretrain(model, data, steps, bs, lr, device, bf16=True, log=print, ckpt_fn=N
     for step in range(1, steps + 1):
         lr_s = cosine_lr(step, steps, warm, lr)
         for g_ in opt.param_groups:
-            g_["lr"] = lr_s
+            g_["lr"] = lr_s * g_.get("lr_mult", 1.0)
         for _ in range(accum):
             x, y = data.sample_batch(bs, rng)
             x = torch.from_numpy(x).to(device, non_blocking=True)

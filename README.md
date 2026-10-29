@@ -92,6 +92,37 @@ python -m musicbot rl-train            # critic + REINFORCE
 python -m musicbot bench               # measure this machine's train/gen speed
 ```
 
+## Experiment Lab — tiny fast A/B training (find what actually works)
+
+Instead of one 6.5 h run, the lab trains **tiny variants (~55 min each, one per GPU)**
+with a **fixed token budget** so A/B comparisons are fair. Samples use **fixed seeds**
+(same 3 seeds for every variant = paired listening), rendered with the same soundfont.
+Everything is published to the public repo
+**[hf.co/datasets/neko-i-am-a-cat/maestro-experiments](https://huggingface.co/datasets/neko-i-am-a-cat/maestro-experiments)**
+(`samples/` zips, `results/` JSON, `ckpt/` weights).
+
+Variants: `control` (base recipe) · `muon` (Muon optimizer on hidden layers —
+modded-nanoGPT speedrun trick) · `data` (+GiantMIDI-Piano, 10,855 pieces) · `both`.
+
+**Session 1** (GPU 0 builds data packs, GPU 1 trains the control):
+
+```
+!test -d classical-gen || git clone https://github.com/thisisforlearn/classical-gen
+!pip install -q mido rich gdown huggingface_hub
+!apt-get install -y -qq fluidsynth >/dev/null 2>&1
+!curl -sL --create-dirs -o classical-gen/soundfonts/MuseScore_General.sf3 \
+  "https://huggingface.co/datasets/mileslilly/soundfonts/resolve/main/MuseScore_General.sf3"
+!cd classical-gen && { CUDA_VISIBLE_DEVICES=0 python kaggle/train_experiment.py prep > prep.log 2>&1 & \
+  CUDA_VISIBLE_DEVICES=1 python kaggle/train_experiment.py run control > control.log 2>&1 & wait; }
+!tail -3 classical-gen/*.log
+```
+
+**Session 2**: same cell but the last line runs `run muon` on GPU 0 and `run data` on GPU 1.
+**Session 3**: `run both` + `run control 3000` (scaling check). Winners get stacked in later rounds.
+
+Judging is **blind**: download the sample zips, listen, rate 1–10, then check `results/`
+to see which variant won.
+
 ## Windows exe (Iris Xe iGPU via DirectML)
 
 1. Copy this folder to Windows (e.g. `C:\music-bot`) and `maestro_bundle.pt` into `models\`
