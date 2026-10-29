@@ -51,13 +51,16 @@ def _note_events(midi_path):
 
 
 def _find_sf2():
+    local = Path(__file__).resolve().parent.parent / "soundfonts"
     for p in (
+        local / "Sonatina_Symphonic_Orchestra.sf2",
+        local / "MuseScore_General.sf2",
         "/usr/share/sounds/sf2/FluidR3_GM.sf2",
         "/usr/share/sounds/sf2/default-GM.sf2",
         "/usr/share/sounds/sf2/TimGM6mb.sf2",
     ):
         if Path(p).exists():
-            return p
+            return str(p)
     return None
 
 

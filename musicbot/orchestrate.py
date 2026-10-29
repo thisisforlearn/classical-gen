@@ -21,8 +21,12 @@ MINOR_TRIADS = [[0, 3, 7], [2, 5, 8], [3, 7, 10], [5, 8, 12], [7, 10, 14], [8, 1
 K_MAJ = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
 K_MIN = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
 SEATING = {  # CC10 pan (0=hard left, 64=center, 127=hard right) + CC91 reverb send
-    VIOLIN: (24, 26), FLUTE: (64, 40), VIOLA: (48, 62), HORN: (78, 72),
-    CELLO: (98, 48), BASS: (110, 55), TIMPANI: (64, 82),
+    "Violin": (24, 26), "Flute": (64, 40), "Viola": (48, 62), "Horn": (78, 72),
+    "Cello": (98, 48), "Contrabass": (110, 55), "Timpani": (64, 82),
+}
+PRESETS = {
+    "gm": {"Violin": 40, "Flute": 73, "Viola": 41, "Horn": 60, "Cello": 42, "Contrabass": 43, "Timpani": 47},
+    "sonatina": {"Violin": 27, "Flute": 52, "Viola": 41, "Horn": 3, "Cello": 38, "Contrabass": 35, "Timpani": 23},
 }
 
 
@@ -71,7 +75,7 @@ def _fit(pitch, lo, hi):
     return pitch
 
 
-def orchestrate(midi_in, midi_out, seed=0, log=print):
+def orchestrate(midi_in, midi_out, seed=0, presets="gm", log=print):
     rng = random.Random(seed * 7919 + 3)
     notes, tpb, tempo, ts = _load_notes(midi_in)
     if not notes:
@@ -108,17 +112,17 @@ def orchestrate(midi_in, midi_out, seed=0, log=print):
 
     def track(name, ch, prog):
         tr = MidiTrack()
-        pan, rev = SEATING[prog]
+        pan, rev = SEATING[name]
         tr.append(MetaMessage("track_name", name=name, time=0))
         tr.append(Message("control_change", channel=ch, control=10, value=pan, time=0))
         tr.append(Message("control_change", channel=ch, control=91, value=rev, time=0))
         tracks[name] = (tr, ch, prog)
         return tr
 
-    for name, ch, prog in (("Violin", 0, VIOLIN), ("Flute", 1, FLUTE), ("Viola", 2, VIOLA),
-                           ("Horn", 3, HORN), ("Cello", 4, CELLO), ("Contrabass", 5, BASS),
-                           ("Timpani", 6, TIMPANI)):
-        track(name, ch, prog)
+    pmap = PRESETS[presets]
+    for name, ch in (("Violin", 0), ("Flute", 1), ("Viola", 2),
+                     ("Horn", 3), ("Cello", 4), ("Contrabass", 5), ("Timpani", 6)):
+        track(name, ch, pmap[name])
 
     def play(name, pitch, t0, t1, vel, legato=0):
         tr, ch, prog = tracks[name]

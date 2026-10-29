@@ -225,8 +225,11 @@ def cmd_render(args):
     stem = Path(midi).stem
     if getattr(args, "orchestra", False):
         from musicbot.orchestrate import orchestrate
+        from musicbot.synth import _find_sf2
+        sf2 = _find_sf2() or ""
+        presets = "sonatina" if "onatina" in Path(sf2).name.lower() else "gm"
         orch = OUT / f"{stem}_orch.mid"
-        orchestrate(str(midi), str(orch), log=c.print)
+        orchestrate(str(midi), str(orch), presets=presets, log=c.print)
         midi = orch
         stem = Path(midi).stem
     wav = OUT / f"{stem}.wav"
