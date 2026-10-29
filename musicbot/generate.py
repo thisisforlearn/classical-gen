@@ -139,8 +139,9 @@ def compose(gen, crit, minutes=16.0, K=4, temp=0.95, topk=40, topp=0.95, device=
         console=console,
     )
     tok_total, t_start = 0, time.time()
+    tgt_label = f"{int(minutes)}:{int(round((minutes % 1) * 60)):02d}"
     with pbar:
-        main = pbar.add_task("composing", total=int(target), done="0:00 / 16:00")
+        main = pbar.add_task("composing", total=int(target), done=f"0:00 / {tgt_label}")
         for si, form in enumerate(plan):
             if made >= target:
                 break
@@ -169,7 +170,7 @@ def compose(gen, crit, minutes=16.0, K=4, temp=0.95, topk=40, topp=0.95, device=
             tok_total += len(best)
             made = duration_sec_weighted(all_toks)
             rate = tok_total / max(1e-9, time.time() - t_start)
-            pbar.update(main, completed=int(min(made, target)), done=f"{int(made // 60)}:{int(made % 60):02d} / 16:00  {rate:.0f} tok/s  score {best_s:.2f}")
+            pbar.update(main, completed=int(min(made, target)), done=f"{int(made // 60)}:{int(made % 60):02d} / {tgt_label}  {rate:.0f} tok/s  score {best_s:.2f}")
     return all_toks
 
 
