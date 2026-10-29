@@ -3,7 +3,7 @@
 #  Auto-harmonize + instrument assignment + humanized performance
 #  v4: phrase dialogue (violin/oboe handoff), violin-II countermelody,
 #      global dynamic arc, CC11 breathing swells, phrase-end ritardando
-#  Author: Vaibhav (sole author; final authority on this project)
+#  Author: thisisforlearn (sole author; final authority on this project)
 #  License: GPL-3.0-only <https://www.gnu.org/licenses/gpl-3.0.html>
 # ============================================================
 from __future__ import annotations

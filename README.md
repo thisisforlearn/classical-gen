@@ -1,6 +1,6 @@
 # MAESTRO — classical music composer bot
 
-**Author: Vaibhav** (sole author; final authority on this project)
+**Author: thisisforlearn** (sole author; final authority on this project)
 **License: GPL-3.0-only** — see [LICENSE](LICENSE). Never MIT.
 
 A two-model system, the proven NotaGen (IJCAI 2025) recipe:

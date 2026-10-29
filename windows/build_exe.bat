@@ -1,7 +1,7 @@
 @echo off
 rem ============================================================
 rem  Maestro Windows exe builder (Iris Xe iGPU via DirectML)
-rem  Author: Vaibhav (sole author; final authority on this project)
+rem  Author: thisisforlearn (sole author; final authority on this project)
 rem  License: GPL-3.0-only <https://www.gnu.org/licenses/gpl-3.0.html>
 rem ============================================================
 echo Installing DirectML + build tools (one time, few minutes)...
