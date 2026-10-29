@@ -12,7 +12,7 @@
 #  Author: Vaibhav Agarwal (@thisisforlearn) - sole author; final authority on this project
 #  License: GPL-3.0-only <https://www.gnu.org/licenses/gpl-3.0.html>
 # ============================================================
-import os, sys, time, json, glob, shutil, zipfile, subprocess
+import os, sys, time, json, glob, shutil, zipfile, subprocess, random
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -352,6 +352,37 @@ def cmd_run(variant, work, steps, big=False):
     con.print(f"[bold green]variant [white]{variant}[/] published to hf.co/datasets/{REPO}[/]")
 
 
+def cmd_blind(work, variants_ran, steps):
+    """One anonymized zip with every variant's samples: A/B/C/D letters, shuffled,
+    so the listening test stays blind. The answer key goes to key.json — don't peek
+    until you've rated."""
+    api = hf()
+    letters = list("ABCDEFGH")
+    random.shuffle(letters)
+    key, files = {}, []
+    for v, L in zip(variants_ran, letters):
+        d = work / f"samples_{v}"
+        got = [s for s in SEEDS if (d / f"s{s}.mp3").exists()]
+        if got:
+            key[L] = v
+            files += [(d / f"s{s}.mp3", f"{L}_s{s}.mp3") for s in got]
+    if len(key) < 2:
+        con.print("[yellow]blind-test skipped: need samples from 2+ variants[/]")
+        return
+    zpath = work / "blind-test.zip"
+    with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
+        for p, arc in files:
+            z.write(p, arcname=arc)
+    kj = work / "blind_key.json"
+    kj.write_text(json.dumps({"key": key, "steps": steps,
+                              "date": time.strftime("%Y-%m-%d %H:%M")}, indent=2))
+    hf_up(api, zpath, "blind-test/blind-test.zip", con.print)
+    hf_up(api, kj, "blind-test/key.json", con.print)
+    con.print(f"[bold green]blind-test.zip ready[/] — download it from "
+              f"hf.co/datasets/{REPO} (blind-test/ folder). Rate each letter 1-10 "
+              "BEFORE opening key.json, then report the ranking.")
+
+
 if __name__ == "__main__":
     work = Path("/kaggle/working") if Path("/kaggle/working").exists() else Path("lab_work")
     work.mkdir(exist_ok=True, parents=True)
@@ -370,5 +401,7 @@ if __name__ == "__main__":
                 variants.append(a)
         for v in (variants or ["control"]):
             cmd_run(v, work, steps, big=big)
+        if len(variants) >= 2 and not big:
+            cmd_blind(work, variants, steps)
     else:
         raise SystemExit("usage: prep | prep-giant | run <variant...> [steps] [--big]")
