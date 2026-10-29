@@ -125,7 +125,7 @@ def cmd_kaggle(_):
         f"[bold]One-paste Kaggle cell written to:[/] {out}  ({len(out.read_text().splitlines())} lines)\n\n"
         f"[bold green]Option A — GitHub (recommended, always up to date):[/]\n"
         f"  On Kaggle (GPU T4 x2, Internet On) paste ONE cell:\n"
-        f"    [cyan]!git clone https://github.com/thisisforlearn/classical-gen[/]\n"
+        f"    [cyan]!test -d classical-gen || git clone https://github.com/thisisforlearn/classical-gen[/]\n"
         f"    [cyan]!pip install -q mido rich[/]\n"
         f"    [cyan]!python classical-gen/kaggle/train_kaggle.py[/]\n"
         f"  Resume: Save Version -> in a new session attach the previous Output as Input;\n"

@@ -34,7 +34,7 @@ python -m musicbot kaggle     # writes models/kaggle_cell.py + prints instructio
 2. Paste **one cell**:
 
    ```
-   !git clone https://github.com/thisisforlearn/classical-gen
+   !test -d classical-gen || git clone https://github.com/thisisforlearn/classical-gen
    !pip install -q mido rich
    !python classical-gen/kaggle/train_kaggle.py
    ```
