@@ -94,9 +94,11 @@ python -m musicbot bench               # measure this machine's train/gen speed
 
 ## Experiment Lab — tiny fast A/B training (find what actually works)
 
-Instead of one 6.5 h run, the lab trains **tiny variants (~55 min each, one per GPU)**
-with a **fixed token budget** so A/B comparisons are fair. Samples use **fixed seeds**
-(same 3 seeds for every variant = paired listening), rendered with the same soundfont.
+Instead of one 6.5 h run, the lab trains **~26M proxy models** (µTransfer: ideas proven
+on small proxies transfer to the 85M champion) with a **fixed token budget** so A/B
+comparisons are fair. Samples use **fixed seeds** (same 3 seeds for every variant =
+paired listening), rendered with the same soundfont, and get **automatic diversity
+metrics** (distinct-n) to catch degenerate variants before human listening.
 Everything is published to the public repo
 **[hf.co/datasets/neko-i-am-a-cat/maestro-experiments](https://huggingface.co/datasets/neko-i-am-a-cat/maestro-experiments)**
 (`samples/` zips, `results/` JSON, `ckpt/` weights).
@@ -114,10 +116,9 @@ uploads the base pack so every future session skips tokenizing entirely:
 
 Watch the background prep anytime with: `!tail -3 classical-gen/prep.log`
 
-**Sessions 2–4**: same one-liner with the last part swapped:
-`run muon` · `run data` · `run both` (packs download from the hub in seconds).
-Optional scaling check: `run control 3000`.
-Winners get stacked in later rounds.
+**Sessions 2–3**: same one-liner, last part swapped — `run muon data` (two variants in
+one session, ~20 min each) then `run both`. After picking a winner by blind listening,
+confirm it at full size: `run <winner> --big` (~1 h at 85M).
 
 Judging is **blind**: download the sample zips, listen, rate 1–10, then check `results/`
 to see which variant won.

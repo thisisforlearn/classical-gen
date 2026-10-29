@@ -28,11 +28,15 @@ from musicbot.generate import compose, decode_tokens
 from musicbot import synth
 
 REPO = "neko-i-am-a-cat/maestro-experiments"   # public HF dataset repo
+# µTransfer proxy model (~21M): ideas proven here transfer to the 85M champion
+# (Tensor Programs V: HPs tuned on 13-40M proxies transfer to multi-B models)
+TM_CFG = dict(GEN_CFG, d=512, n_layer=8, n_head=8, ff=1408, ctx=1024, drop=0.1)
 GCFG = dict(GEN_CFG, d=768, n_layer=12, n_head=12, ff=2048, ctx=1024, drop=0.1)
 CTX = 1024
-STEPS_DEFAULT = 1500            # fixed token budget => fair A/B (same tokens seen)
+STEPS_DEFAULT = 3000           # ~74M tokens at bs24 — audible differences at 21M
 BS_PER_GPU = 12
 LR = 3e-4
+VARIANTS = ("control", "muon", "data", "both")
 SEEDS = [11, 22, 33]            # fixed sample seeds across ALL variants
 SAMPLE_MIN = 0.66               # ~40 s per sample
 TRAIN_SECONDS_CAP = 58 * 60     # safety net if a step is slow
@@ -77,9 +81,17 @@ def hf():
     return api
 
 
-def hf_up(api, path, name, log=print):
-    api.upload_file(path_or_fileobj=str(path), path_in_repo=name, repo_type="dataset")
-    log(f"uploaded: {name}")
+def hf_up(api, path, name, log=print, tries=3):
+    for i in range(tries):
+        try:
+            api.upload_file(path_or_fileobj=str(path), path_in_repo=name, repo_type="dataset")
+            log(f"uploaded: {name}")
+            return True
+        except Exception as e:
+            log(f"[yellow]upload retry {i + 1}/{tries} for {name}: {e}[/]")
+            time.sleep(10 * (i + 1))
+    log(f"[bold red]upload FAILED after {tries} tries: {name}[/]")
+    return False
 
 
 def hf_down(name, dest_dir, log=print):
@@ -182,19 +194,52 @@ def setup_sound(work):
     return sf
 
 
-def cmd_run(variant, work, steps):
-    assert variant in ("control", "muon", "data", "both"), variant
+def eval_loss(model, data, device, n=20, bs=8):
+    """Honest held-out loss on fresh batches (no log parsing)."""
+    model.eval()
+    rng = np.random.default_rng(4242)
+    tot = 0.0
+    with torch.no_grad():
+        for _ in range(n):
+            x, y = data.sample_batch(bs, rng)
+            x = torch.from_numpy(x).to(device)
+            y = torch.from_numpy(y).to(device)
+            with torch.autocast(device_type="cuda" if device == "cuda" else "cpu",
+                                dtype=torch.bfloat16, enabled=device == "cuda"):
+                _, loss = model(x, y)
+            tot += float(loss.mean())
+    model.train()
+    return round(tot / n, 4)
+
+
+def diversity(toks):
+    """Yang & Lerch 2018 distinct-n (unique n-grams / total) — degeneracy detector."""
+    def dist(n):
+        if len(toks) < n:
+            return 0.0
+        grams = [tuple(toks[i:i + n]) for i in range(len(toks) - n + 1)]
+        return round(len(set(grams)) / len(grams), 3)
+    return {f"distinct_{n}": dist(n) for n in (2, 3, 4)}
+
+
+def cmd_run(variant, work, steps, big=False):
+    assert variant in VARIANTS, variant
     api = hf()
     n_cpu, ngpu = sys_report()
     dev = "cuda" if ngpu else "cpu"
-    bs = BS_PER_GPU * max(1, ngpu)
+    if not ngpu:
+        con.print("[bold red]NO GPU VISIBLE — aborting (check Accelerator = GPU T4 x2)[/]")
+        raise SystemExit(1)
+    bs = BS_PER_GPU * ngpu
+    cfg = GCFG if big else TM_CFG
     torch.manual_seed(0)
     data, built_locally = get_corpus(variant, work, n_cpu)
     con.print(f"corpus: {data.n_tokens:,} tokens / {data.n_pieces} pieces")
-    gen = GPT(GCFG).to(dev)
+    gen = GPT(cfg).to(dev)
     n_params = sum(p.numel() for p in gen.parameters())
-    con.print(f"model: {n_params / 1e6:.1f}M params · variant [bold]{variant}[/] · "
-              f"{steps} steps · bs {bs} · {'DataParallel x%d' % ngpu if ngpu > 1 else 'single GPU'}")
+    con.print(f"model: {n_params / 1e6:.1f}M proxy · variant [bold]{variant}[/] · "
+              f"{steps} steps · bs {bs} · {'DataParallel x%d' % ngpu if ngpu > 1 else 'single GPU'}"
+              + (" [yellow]BIG confirm run[/]" if big else ""))
 
     ema_loss = [0.0]
 
@@ -212,20 +257,23 @@ def cmd_run(variant, work, steps):
                       ls=0.1, opt=build_opt(variant, gen))
     wall = time.time() - t0
     ema.copy_to(gen)
+    heldout = eval_loss(gen, data, dev)
 
     # ---------------- samples (fixed seeds = paired comparison across variants)
     setup_sound(work)
     out = work / f"samples_{variant}"
     out.mkdir(exist_ok=True)
-    results = dict(variant=variant, steps=steps, params_M=round(n_params / 1e6, 1),
+    results = dict(variant=variant, model_M=round(n_params / 1e6, 1), steps=steps,
                    corpus_tokens=int(data.n_tokens), wall_min=round(wall / 60, 1),
-                   final_loss=round(ema_loss[0], 4), seeds=SEEDS,
-                   gpus=ngpu, date=time.strftime("%Y-%m-%d %H:%M"))
+                   heldout_loss=heldout, seeds=SEEDS, gpus=ngpu,
+                   date=time.strftime("%Y-%m-%d %H:%M"))
+    divs = []
     for s in SEEDS:
         try:
             mid = out / f"s{s}.mid"
             toks = compose(gen, None, minutes=SAMPLE_MIN, K=1, device=dev,
                            precision="fp32" if ngpu else "int8", seed=s, log=con.print)
+            divs.append(diversity(toks))
             decode_tokens(toks).save(str(mid))
             wav = out / f"s{s}.wav"
             synth.render_wav(mid, wav, log=con.print)
@@ -237,6 +285,9 @@ def cmd_run(variant, work, steps):
             results[f"s{s}_notes"] = mid.exists()
         except Exception as e:
             con.print(f"[yellow]sample seed {s} failed: {e}[/]")
+    if divs:
+        results["diversity_mean"] = {k: round(sum(d[k] for d in divs) / len(divs), 3)
+                                     for k in divs[0]}
     (out / "results.json").write_text(json.dumps(results, indent=2))
     con.print(json.dumps(results, indent=2))
 
@@ -259,9 +310,9 @@ def cmd_run(variant, work, steps):
         except Exception as e:
             con.print(f"[yellow]base pack upload skipped: {e}[/]")
     ck = work / f"ckpt_{variant}.pt"
-    torch.save({"gen_cfg": GCFG, "gen": gen.state_dict(),
-                "meta": {"variant": variant, "steps": steps, "author": "Vaibhav Agarwal",
-                         "license": "GPL-3.0-only"}}, ck)
+    torch.save({"gen_cfg": cfg, "gen": gen.state_dict(),
+                "meta": {"variant": variant, "steps": steps, "model_M": round(n_params / 1e6, 1),
+                         "author": "Vaibhav Agarwal", "license": "GPL-3.0-only"}}, ck)
     hf_up(api, ck, f"ckpt/ckpt_{variant}_{steps}.pt", con.print)
     con.print(f"[bold green]variant [white]{variant}[/] published to hf.co/datasets/{REPO}[/]")
 
@@ -274,8 +325,15 @@ if __name__ == "__main__":
         workers = int(sys.argv[2]) if len(sys.argv) > 2 else n_cpu
         cmd_prep(work, workers, giant_only=(sys.argv[1] == "prep-giant"))
     elif len(sys.argv) >= 2 and sys.argv[1] == "run":
-        variant = sys.argv[2] if len(sys.argv) > 2 else "control"
-        steps = int(sys.argv[3]) if len(sys.argv) > 3 else STEPS_DEFAULT
-        cmd_run(variant, work, steps)
+        variants, steps, big = [], STEPS_DEFAULT, False
+        for a in sys.argv[2:]:
+            if a.isdigit():
+                steps = int(a)
+            elif a == "--big":
+                big = True
+            elif a in VARIANTS:
+                variants.append(a)
+        for v in (variants or ["control"]):
+            cmd_run(v, work, steps, big=big)
     else:
-        raise SystemExit("usage: prep | run <control|muon|data|both> [steps]")
+        raise SystemExit("usage: prep | prep-giant | run <variant...> [steps] [--big]")
