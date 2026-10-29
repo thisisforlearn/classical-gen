@@ -223,6 +223,12 @@ def cmd_render(args):
     OUT.mkdir(exist_ok=True)
     midi = args.midi or sorted(OUT.glob("*.mid"))[-1]
     stem = Path(midi).stem
+    if getattr(args, "orchestra", False):
+        from musicbot.orchestrate import orchestrate
+        orch = OUT / f"{stem}_orch.mid"
+        orchestrate(str(midi), str(orch), log=c.print)
+        midi = orch
+        stem = Path(midi).stem
     wav = OUT / f"{stem}.wav"
     render_wav(str(midi), str(wav), log=c.print)
     maybe_mp3(str(wav), OUT, log=c.print)
@@ -333,12 +339,14 @@ def main():
     pg.add_argument("--device", default="auto")
     pg.add_argument("--seed", type=int, default=0)
     pren = sub.add_parser("render"); pren.add_argument("--midi", default=None)
+    pren.add_argument("--orchestra", action="store_true")
     pall = sub.add_parser("all")
     pall.add_argument("--minutes", type=float, default=16.0)
     pall.add_argument("--candidates", type=int, default=4)
     pall.add_argument("--precision", choices=["int8", "bf16", "fp32"], default="int8")
     pall.add_argument("--device", default="auto")
     pall.add_argument("--seed", type=int, default=0)
+    pall.add_argument("--orchestra", action="store_true")
     sub.add_parser("windows")
     a = p.parse_args()
     dict(check=cmd_check, prepare=cmd_prepare, train=cmd_train, bench=cmd_bench, **{"rl-train": cmd_rl},

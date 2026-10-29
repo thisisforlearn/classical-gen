@@ -121,12 +121,18 @@ def _cut_section(toks):
     return t
 
 
-def compose(gen, crit, minutes=16.0, K=4, temp=0.95, topk=40, topp=0.95, device="cpu",
+def compose(gen, crit, minutes=16.0, K=4, temp=1.0, topk=20, topp=0.95, device="cpu",
             precision="int8", seed=0, log=print, console=None):
+    import random
     torch.manual_seed(seed)
+    rng = random.Random(seed * 2654435761 % (2 ** 31))
+    temp = max(0.9, temp * (0.96 + 0.08 * rng.random()))
+    rep = 1.15 + 0.1 * rng.random()
     autocast = _is_cpu(device) and precision == "bf16"
     target = minutes * 60.0 + 30.0
-    plan = list(FORM_PLANS[seed % len(FORM_PLANS)])
+    plan = list(FORM_PLANS[rng.randrange(len(FORM_PLANS))])
+    if rng.random() < 0.7:
+        plan.insert(rng.randrange(2, len(plan) - 1), rng.choice(["A2", "B", "C", "dev"]))
     while len(plan) < 24:
         plan += ["A", "B", "C", "A2"][seed % 4 :]
     plan = plan[:24]
@@ -150,7 +156,7 @@ def compose(gen, crit, minutes=16.0, K=4, temp=0.95, topk=40, topp=0.95, device=
             pb = torch.tensor(prompt, dtype=torch.long)[None, :].repeat(K, 1)
             psec = pbar.add_task(f"section {si + 1} [{form}]", total=sec_len, done="")
             with torch.no_grad():
-                cont = _gen_batch(gen, pb, sec_len, temp, topk, topp, 1.15, device, autocast)
+                cont = _gen_batch(gen, pb, sec_len, temp, topk, topp, rep, device, autocast)
             pbar.remove_task(psec)
             best, best_s = None, -1e9
             for k in range(K):

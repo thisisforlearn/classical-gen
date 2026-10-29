@@ -68,7 +68,7 @@ def render_wav(midi_path, wav_path, log=print):
         log(f"fluidsynth render ({Path(sf2).name})...")
         subprocess.run(
             [fs, "-ni", "-g", "0.7", "-r", str(SR), "-F", str(wav_path), sf2, str(midi_path)],
-            check=True, capture_output=True, timeout=1800,
+            check=True, capture_output=True, timeout=180,
         )
         log(f"wrote {wav_path}")
         return wav_path
