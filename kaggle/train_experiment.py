@@ -28,12 +28,12 @@ from musicbot.generate import compose, decode_tokens
 from musicbot import synth
 
 REPO = "neko-i-am-a-cat/maestro-experiments"   # public HF dataset repo
-# µTransfer proxy model (~21M): ideas proven here transfer to the 85M champion
-# (Tensor Programs V: HPs tuned on 13-40M proxies transfer to multi-B models)
-TM_CFG = dict(GEN_CFG, d=512, n_layer=8, n_head=8, ff=1408, ctx=1024, drop=0.1)
+# µTransfer proxy model (~10M): ideas proven here transfer to the 85M champion
+# (Tensor Programs V: HPs tuned on 13M proxies transferred to GPT-3 6.7B)
+TM_CFG = dict(GEN_CFG, d=384, n_layer=6, n_head=6, ff=1024, ctx=1024, drop=0.1)
 GCFG = dict(GEN_CFG, d=768, n_layer=12, n_head=12, ff=2048, ctx=1024, drop=0.1)
 CTX = 1024
-STEPS_DEFAULT = 3000           # ~74M tokens at bs24 — audible differences at 21M
+STEPS_DEFAULT = 1000           # ~25M tokens at bs24 — enough for audible A/B at 10M
 BS_PER_GPU = 12
 LR = 3e-4
 VARIANTS = ("control", "muon", "data", "both", "arch", "softcap")
@@ -46,8 +46,8 @@ def build_cfg(variant, big):
     elif variant == "softcap":  # logit softcap 15 (Gemma-2 style)
         cfg.update(softcap=15)
     return cfg
-SEEDS = [11, 22, 33]            # fixed sample seeds across ALL variants
-SAMPLE_MIN = 0.66               # ~40 s per sample
+SEEDS = [11, 22]               # fixed sample seeds across ALL variants (paired)
+SAMPLE_MIN = 1.0               # 60 s clips: span 2-3 form sections (research-backed)
 TRAIN_SECONDS_CAP = 58 * 60     # safety net if a step is slow
 GIANT_FOLDER = "https://drive.google.com/drive/folders/1Stz3CAvMoplo79LR5I3onMWRelCugBYS"
 SF3_URL = "https://huggingface.co/datasets/mileslilly/soundfonts/resolve/main/MuseScore_General.sf3"
@@ -192,7 +192,13 @@ def get_corpus(variant, work, workers):
         src = d / names[0].split("/")[0]
         return PackedData(src, CTX), False
     except Exception as e:
-        con.print(f"[yellow]pack download failed ({e}) — tokenizing locally[/]")
+        if want_giant:
+            # never let data/both silently train on the base corpus — that would
+            # fake a "data win". Abort loudly instead.
+            raise SystemExit(
+                f"[!] variant '{variant}' needs the GIANT pack but it is missing "
+                f"({e}). Run a 'prep-giant' session first, then re-run this variant.")
+        con.print(f"[yellow]base pack download failed ({e}) — tokenizing locally[/]")
     base = work / "corpus_local"
     if not (base / "packed.npy").exists():
         maestro = download_maestro(str(work / "dl"), log=con.print)
@@ -307,6 +313,7 @@ def cmd_run(variant, work, steps, big=False):
             synth.render_wav(mid, wav, log=con.print)
             mp3 = out / f"s{s}.mp3"
             r = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(wav),
+                                "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
                                 "-b:a", "128k", str(mp3)], capture_output=True)
             if r.returncode == 0 and mp3.exists():
                 wav.unlink()

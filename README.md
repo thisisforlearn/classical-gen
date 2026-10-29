@@ -94,31 +94,35 @@ python -m musicbot bench               # measure this machine's train/gen speed
 
 ## Experiment Lab — tiny fast A/B training (find what actually works)
 
-Instead of one 6.5 h run, the lab trains **~26M proxy models** (µTransfer: ideas proven
+Instead of one 6.5 h run, the lab trains **~10M proxy models** (µTransfer: ideas proven
 on small proxies transfer to the 85M champion) with a **fixed token budget** so A/B
-comparisons are fair. Samples use **fixed seeds** (same 3 seeds for every variant =
-paired listening), rendered with the same soundfont, and get **automatic diversity
-metrics** (distinct-n) to catch degenerate variants before human listening.
+comparisons are fair. Samples use **fixed seeds** (same 2 seeds for every variant =
+paired listening), rendered with the same soundfont, **loudness-normalized** (linear,
+-16 LUFS — level never biases the blind test), and get **automatic diversity metrics**
+(distinct-n) to catch degenerate variants before human listening.
 Everything is published to the public repo
 **[hf.co/datasets/neko-i-am-a-cat/maestro-experiments](https://huggingface.co/datasets/neko-i-am-a-cat/maestro-experiments)**
 (`samples/` zips, `results/` JSON, `ckpt/` weights).
 
 Variants: `control` (base recipe) · `muon` (Muon optimizer on hidden layers —
-modded-nanoGPT speedrun trick) · `data` (+GiantMIDI-Piano, 10,855 pieces) · `both`.
+modded-nanoGPT speedrun trick) · `arch` (QK-norm + ReLU² + zero-init — modernization
+bundle) · `softcap` (logit softcap 15, Gemma-2 style) · `data` (+GiantMIDI-Piano,
+10,855 pieces) · `both`.
 
-**Session 1** — one line. GiantMIDI prep runs in the background; the **control variant
-trains in the foreground with live progress bars** (DataParallel over both GPUs), then
-uploads the base pack so every future session skips tokenizing entirely:
+**Session 1 (Round 1 — ~45 min)** — one line. GiantMIDI prep runs in the background;
+**four variants train sequentially in the foreground with live progress bars**
+(DataParallel over both GPUs), then uploads the base pack so every future session
+skips tokenizing entirely:
 
 ```
-!test -d classical-gen || git clone -q https://github.com/thisisforlearn/classical-gen; pip install -q mido rich gdown huggingface_hub psutil; (apt-get update -qq && apt-get install -y -qq fluidsynth) >/dev/null 2>&1; curl -sL --create-dirs -o classical-gen/soundfonts/MuseScore_General.sf3 "https://huggingface.co/datasets/mileslilly/soundfonts/resolve/main/MuseScore_General.sf3"; (cd classical-gen && python kaggle/train_experiment.py prep-giant 2 > prep.log 2>&1 &); cd classical-gen && python kaggle/train_experiment.py run control
+!test -d classical-gen || git clone -q https://github.com/thisisforlearn/classical-gen; pip install -q mido rich gdown huggingface_hub psutil; (apt-get update -qq && apt-get install -y -qq fluidsynth) >/dev/null 2>&1; curl -sL --create-dirs -o classical-gen/soundfonts/MuseScore_General.sf3 "https://huggingface.co/datasets/mileslilly/soundfonts/resolve/main/MuseScore_General.sf3"; (cd classical-gen && python kaggle/train_experiment.py prep-giant 2 > prep.log 2>&1 &); cd classical-gen && python kaggle/train_experiment.py run control muon arch softcap
 ```
 
 Watch the background prep anytime with: `!tail -3 classical-gen/prep.log`
 
-**Sessions 2–3**: same one-liner, last part swapped — `run muon data` (two variants in
-one session, ~20 min each) then `run both`. After picking a winner by blind listening,
-confirm it at full size: `run <winner> --big` (~1 h at 85M).
+**Round 2 (after blind listening)**: same one-liner, last part swapped —
+`run <winner> data` (~1.5 h: GiantMIDI at 85M scale via µTransfer) or `run both`.
+After picking the final winner, confirm at full size: `run <winner> --big` (~1 h at 85M).
 
 Judging is **blind**: download the sample zips, listen, rate 1–10, then check `results/`
 to see which variant won.
