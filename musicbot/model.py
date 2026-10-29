@@ -52,11 +52,13 @@ def _apply_rope(x, cos, sin):
 
 
 class Attn(nn.Module):
-    def __init__(self, d, n_head):
+    def __init__(self, cfg):
         super().__init__()
+        d, n_head = cfg.d, cfg.n_head
         assert d % n_head == 0, f"d={d} must be divisible by n_head={n_head}"
         self.n_head = n_head
         self.hd = d // n_head
+        self.qk_norm = nn.RMSNorm(self.hd) if getattr(cfg, "qk_norm", False) else None
         self.qkv = nn.Linear(d, 3 * d, bias=False)
         self.proj = nn.Linear(d, d, bias=False)
 
@@ -66,6 +68,8 @@ class Attn(nn.Module):
         q, k, v = qkv[0], qkv[1], qkv[2]
         q = _apply_rope(q, cos, sin)
         k = _apply_rope(k, cos, sin)
+        if self.qk_norm is not None:
+            q, k = self.qk_norm(q), self.qk_norm(k)
         if cache is not None:
             idx = cache["idx"]
             cache["k"][:, :, idx : idx + T] = k
@@ -97,15 +101,21 @@ class Block(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.n1 = nn.RMSNorm(cfg.d)
-        self.attn = Attn(cfg.d, cfg.n_head)
+        self.attn = Attn(cfg)
         self.n2 = nn.RMSNorm(cfg.d)
+        self.relu2 = getattr(cfg, "relu2", False)
         self.up = nn.Linear(cfg.d, cfg.ff, bias=False)
-        self.gate = nn.Linear(cfg.d, cfg.ff, bias=False)
+        if not self.relu2:
+            self.gate = nn.Linear(cfg.d, cfg.ff, bias=False)
         self.down = nn.Linear(cfg.ff, cfg.d, bias=False)
 
     def forward(self, x, cos, sin, cache=None):
         x = x + self.attn(self.n1(x), cos, sin, cache)
-        x = x + self.down(F.silu(self.gate(self.n2(x))) * self.up(self.n2(x)))
+        n2x = self.n2(x)
+        if self.relu2:
+            x = x + self.down(F.relu(self.up(n2x)) ** 2)
+        else:
+            x = x + self.down(F.silu(self.gate(n2x)) * self.up(n2x))
         return x
 
 
@@ -120,9 +130,14 @@ class GPT(nn.Module):
         self.norm_f = nn.RMSNorm(cfg.d)
         self.head = nn.Linear(cfg.d, cfg.vocab, bias=False)
         self.apply(self._init)
+        zero = getattr(cfg, "zero_init", False)
         for b in self.blocks:
-            nn.init.normal_(b.down.weight, std=0.02 / math.sqrt(2 * cfg.n_layer))
-            nn.init.normal_(b.attn.proj.weight, std=0.02 / math.sqrt(2 * cfg.n_layer))
+            if zero:
+                nn.init.zeros_(b.down.weight)
+                nn.init.zeros_(b.attn.proj.weight)
+            else:
+                nn.init.normal_(b.down.weight, std=0.02 / math.sqrt(2 * cfg.n_layer))
+                nn.init.normal_(b.attn.proj.weight, std=0.02 / math.sqrt(2 * cfg.n_layer))
 
     def _init(self, m):
         if isinstance(m, nn.Linear):
@@ -145,9 +160,16 @@ class GPT(nn.Module):
         x = self.norm_f(x)
         if targets is not None:
             logits = self.head(x)
+            cap = getattr(self.cfg, "softcap", 0)
+            if cap:
+                logits = cap * torch.tanh(logits / cap)
             return logits, F.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1),
                                            ignore_index=-100, label_smoothing=ls)
-        return self.head(x[:, [-1]] if cache is not None else x), None
+        out = self.head(x[:, [-1]] if cache is not None else x)
+        cap = getattr(self.cfg, "softcap", 0)
+        if cap:
+            out = cap * torch.tanh(out / cap)
+        return out, None
 
     def num_params(self):
         return sum(p.numel() for p in self.parameters())

@@ -36,7 +36,16 @@ CTX = 1024
 STEPS_DEFAULT = 3000           # ~74M tokens at bs24 — audible differences at 21M
 BS_PER_GPU = 12
 LR = 3e-4
-VARIANTS = ("control", "muon", "data", "both")
+VARIANTS = ("control", "muon", "data", "both", "arch", "softcap")
+
+
+def build_cfg(variant, big):
+    cfg = dict(GCFG if big else TM_CFG)
+    if variant == "arch":      # modded-nanoGPT "architecture modernization" bundle
+        cfg.update(qk_norm=True, relu2=True, zero_init=True)
+    elif variant == "softcap":  # logit softcap 15 (Gemma-2 style)
+        cfg.update(softcap=15)
+    return cfg
 SEEDS = [11, 22, 33]            # fixed sample seeds across ALL variants
 SAMPLE_MIN = 0.66               # ~40 s per sample
 TRAIN_SECONDS_CAP = 58 * 60     # safety net if a step is slow
@@ -128,21 +137,40 @@ def cmd_prep(work, workers, giant_only=False):
     # ---- giant pack
     giant_dir = packs / "giant"
     if not (giant_dir / "packed.npy").exists():
-        con.print("[bold cyan]downloading GiantMIDI-Piano (193 MB)...[/]")
+        con.print("[bold cyan]fetching GiantMIDI-Piano midis...[/]")
         raw = work / "giantmidi_raw"
         raw.mkdir(parents=True, exist_ok=True)
-        r = subprocess.run([sys.executable, "-m", "gdown", "--folder", GIANT_FOLDER,
+        mids = []
+        # plan A: kagglehub (fast, no quota) — two known dataset mirrors
+        try:
+            import kagglehub
+            for slug in ("pictureinthenoise/music-generation-with-giantmidi-piano",
+                         "danieljhuang/giantmidi-piano"):
+                try:
+                    p = kagglehub.dataset_download(slug)
+                    found = list(Path(p).rglob("*.mid")) + list(Path(p).rglob("*.midi"))
+                    if found:
+                        con.print(f"kagglehub: {slug} -> {len(found)} midis")
+                        mids = found
+                        break
+                except Exception as e:
+                    con.print(f"[yellow]kagglehub {slug} failed: {e}[/]")
+        except Exception:
+            pass
+        # plan B: Google Drive folder via gdown
+        if not mids:
+            subprocess.run([sys.executable, "-m", "gdown", "--folder", GIANT_FOLDER,
                             "-O", str(raw), "--remaining-ok", "--fuzzy"],
                            capture_output=True, text=True)
-        mids = list(raw.rglob("*.mid")) + list(raw.rglob("*.midi"))
-        for z in list(raw.rglob("*.zip")) + list(raw.rglob("*.tar.gz")):
-            shutil.unpack_archive(str(z), str(raw / "unpacked"))
-        mids += list((raw / "unpacked").rglob("*.mid")) + list((raw / "unpacked").rglob("*.midi"))
+            mids = list(raw.rglob("*.mid")) + list(raw.rglob("*.midi"))
+            for z in list(raw.rglob("*.zip")) + list(raw.rglob("*.tar.gz")):
+                shutil.unpack_archive(str(z), str(raw / "unpacked"))
+            mids += list((raw / "unpacked").rglob("*.mid")) + list((raw / "unpacked").rglob("*.midi"))
         if not mids:
             con.print("[bold red]GiantMIDI download failed — skip data variants this round[/]")
             return
         con.print(f"GiantMIDI: {len(mids)} MIDI files")
-        _tokenize([Path(m) for m in mids][:8000], giant_dir, workers, log=con.print)
+        _tokenize([Path(m) for m in mids][:12000], giant_dir, workers, log=con.print)
         meta = json.loads((giant_dir / "meta.json").read_text())
         con.print(f"giant pack: {meta['n_tokens']:,} tokens / {meta['n_pieces']} pieces")
     hf_up(api, giant_dir / "packed.npy", "giant/packed.npy", con.print)
@@ -231,7 +259,7 @@ def cmd_run(variant, work, steps, big=False):
         con.print("[bold red]NO GPU VISIBLE — aborting (check Accelerator = GPU T4 x2)[/]")
         raise SystemExit(1)
     bs = BS_PER_GPU * ngpu
-    cfg = GCFG if big else TM_CFG
+    cfg = build_cfg(variant, big)
     torch.manual_seed(0)
     data, built_locally = get_corpus(variant, work, n_cpu)
     con.print(f"corpus: {data.n_tokens:,} tokens / {data.n_pieces} pieces")
