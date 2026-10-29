@@ -1,6 +1,6 @@
 # ============================================================
 #  Maestro CLI — rich terminal interface
-#  Author: thisisforlearn (sole author; final authority on this project)
+#  Author: Vaibhav Agarwal (@thisisforlearn) - sole author; final authority on this project
 #  License: GPL-3.0-only <https://www.gnu.org/licenses/gpl-3.0.html>
 # ============================================================
 from __future__ import annotations
@@ -142,7 +142,7 @@ def build_kaggle_cell() -> str:
     header = (
         "# ============================================================\n"
         "#  MAESTRO one-paste Kaggle training cell\n"
-        "#  Author: thisisforlearn (sole author; final authority on this project)\n"
+        "#  Author: Vaibhav Agarwal (@thisisforlearn) - sole author; final authority on this project\n"
         "#  License: GPL-3.0-only <https://www.gnu.org/licenses/gpl-3.0.html>\n"
         "#  Trains generator + critic + RL on Kaggle GPU, exports maestro_bundle.zip\n"
         "# ============================================================\n"

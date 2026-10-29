@@ -1,6 +1,6 @@
 # ============================================================
 #  Maestro — Kaggle training driver (package mode, git-clone flow)
-#  Author: thisisforlearn (sole author; final authority on this project)
+#  Author: Vaibhav Agarwal (@thisisforlearn) - sole author; final authority on this project
 #  License: GPL-3.0-only <https://www.gnu.org/licenses/gpl-3.0.html>
 #  Run on Kaggle:  !git clone https://github.com/thisisforlearn/classical-gen
 #                  !pip install -q mido rich

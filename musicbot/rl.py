@@ -1,6 +1,6 @@
 # ============================================================
 #  Maestro RL — theory rewards, critic training, REINFORCE fine-tuning
-#  Author: thisisforlearn (sole author; final authority on this project)
+#  Author: Vaibhav Agarwal (@thisisforlearn) - sole author; final authority on this project
 #  License: GPL-3.0-only <https://www.gnu.org/licenses/gpl-3.0.html>
 # ============================================================
 from __future__ import annotations
